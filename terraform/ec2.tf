@@ -16,18 +16,45 @@ data "aws_ami" "amazon_linux" {
 resource "aws_key_pair" "sbbs" {
   key_name   = "sbbs"
   public_key = file("~/.ssh/id_ed25519.pub")
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Elastic IP for consistent public IP address
+resource "aws_eip" "sbbs_eip" {
+  domain = "vpc"
+  
+  tags = {
+    Name        = "${var.project_name}-sbbs-eip"
+    Environment = var.environment
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Associate Elastic IP with the instance
+resource "aws_eip_association" "sbbs_eip_assoc" {
+  instance_id   = aws_instance.sbbs_server.id
+  allocation_id = aws_eip.sbbs_eip.id
 }
 
 resource "aws_instance" "sbbs_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  instance_type         = "t2.micro"
+  instance_type         = "t3.micro"
   key_name              = aws_key_pair.sbbs.key_name
   vpc_security_group_ids = [aws_security_group.sbbs.id]
   subnet_id             = aws_subnet.public.id
 
   tags = {
     Name = "${var.project_name}-sbbs-server"
+    Environment = var.environment
+    Backup = "true"
   }
+
+  # Force recreation when key changes
+  user_data = base64encode("echo 'Key: ${aws_key_pair.sbbs.key_name}'")
 }
 
 resource "aws_security_group" "sbbs" {

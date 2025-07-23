@@ -8,13 +8,13 @@ resource "aws_route53_zone" "c64_pub" {
   }
 }
 
-# A record for sbbs.c64.pub pointing to EC2 instance
+# A record for bbs.c64.pub pointing to Elastic IP
 resource "aws_route53_record" "sbbs" {
   zone_id = aws_route53_zone.c64_pub.zone_id
-  name    = "sbbs.c64.pub"
+  name    = "bbs.c64.pub"
   type    = "A"
-  ttl     = 300
-  records = [aws_instance.sbbs_server.public_ip]
+  ttl     = 600
+  records = [aws_eip.sbbs_eip.public_ip]
 }
 
 # Output the name servers for the hosted zone
