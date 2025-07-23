@@ -1,0 +1,19 @@
+[Unit]
+Description=Synchronet BBS
+After=network.target
+
+[Service]
+Type=forking
+User={{ sbbs_user }}
+Group={{ sbbs_user }}
+WorkingDirectory={{ sbbs_dir }}/ctrl
+Environment=SBBSCTRL={{ sbbs_dir }}/ctrl
+ExecStart={{ sbbs_dir }}/exec/sbbs -d
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile={{ sbbs_dir }}/ctrl/sbbs.pid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

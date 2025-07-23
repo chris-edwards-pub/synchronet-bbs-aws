@@ -1,0 +1,233 @@
+---
+# Ansible playbook to install and configure Synchronet BBS
+# This playbook will:
+# - Create sbbs user and set up dependencies
+# - Install Synchronet from source
+# - Configure basic runtime environment
+# Only rebuilds/reinstalls if sbbs binary is missing or non-functional
+
+- hosts: all
+  become: "yes"
+  vars:
+    ansible_become_method: sudo
+    ansible_become_flags: '-H -S -n'
+    ansible_python_interpreter: auto_silent
+    ansible_become_pass: ""
+    sbbs_user: sbbs
+    sbbs_home: /home/{{ sbbs_user }}
+    sbbs_dir: "{{ sbbs_home }}/sbbs"
+    repo_dir: "{{ sbbs_dir }}/repo"
+    sbbs_symlink: "{{ sbbs_dir }}/exec/sbbs"
+
+  tasks:
+    - name: Add Group sbbs
+      group:
+        name: sbbs
+
+    - name: Ensure sbbs user exists
+      user:
+        name: "{{ sbbs_user }}"
+        shell: /bin/bash
+        groups: wheel,sbbs
+        append: "yes"
+        create_home: "yes"
+
+    - name: Configure passwordless sudo for sbbs user
+      lineinfile:
+        path: /etc/sudoers.d/sbbs
+        line: "{{ sbbs_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: yes
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Install system dependencies
+      dnf:
+        name:
+          - git
+          - "@Development Tools"
+          - pkg-config
+          - ncurses-devel
+          - libarchive-devel
+          - openssl-devel
+          - libcurl-devel
+          - nspr-devel
+          - nss-devel
+          - libcap-devel
+          - zip
+          - unzip
+          - telnet
+        state: present
+
+    - name: Check if SBBS symlink exists
+      stat:
+        path: "{{ sbbs_symlink }}"
+        follow: no
+      register: symlink_check
+
+    - name: Get sbbs binary path from symlink
+      command: readlink -f {{ sbbs_symlink }}
+      register: sbbs_binary_path
+      ignore_errors: yes
+      when: symlink_check.stat.exists
+      changed_when: false
+
+    - name: Set binary path fact
+      set_fact:
+        sbbs_binary: "{{ sbbs_binary_path.stdout | default(repo_dir + '/src/sbbs3/gcc.linux.x64.exe.release/sbbs') }}"
+
+    - name: Check if sbbs binary exists and works
+      become_user: "{{ sbbs_user }}"
+      command: "{{ sbbs_binary }} version"
+      register: sbbs_check
+      ignore_errors: yes
+      changed_when: false
+      when: symlink_check.stat.exists
+
+    - name: Display SBBS version
+      debug:
+        msg: "{{ sbbs_check.stdout }}"
+      when: sbbs_check is defined and sbbs_check.stdout is defined and sbbs_check.rc == 0
+
+    - name: Configure environment
+      lineinfile:
+        path: "{{ sbbs_home }}/.bashrc"
+        line: export SBBSCTRL={{ sbbs_dir }}/ctrl
+        insertafter: EOF
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: '0644'
+
+    - block:
+        - name: Create synchronet directory
+          become_user: "{{ sbbs_user }}"
+          file:
+            path: "{{ sbbs_dir }}"
+            state: directory
+            owner: "{{ sbbs_user }}"
+            group: "{{ sbbs_user }}"
+
+        - name: Clean up previous installation
+          become_user: "{{ sbbs_user }}"
+          shell: |
+            rm -rf ctrl docs exec node? text web webv4 xtrn mods repo
+          args:
+            chdir: "{{ sbbs_dir }}"
+          ignore_errors: yes
+
+        - name: Clone Synchronet source repo to repo subdirectory
+          become_user: "{{ sbbs_user }}"
+          git:
+            repo: https://gitlab.synchro.net/main/sbbs.git
+            dest: "{{ repo_dir }}"
+            version: master
+            update: "yes"
+            force: yes
+
+        - name: Build Synchronet (all components)
+          become_user: "{{ sbbs_user }}"
+          shell: |
+            make -j{{ ansible_processor_cores }} RELEASE=1
+          args:
+            chdir: "{{ repo_dir }}/src/sbbs3"
+
+        - name: Create runtime directories and install Synchronet
+          become_user: "{{ sbbs_user }}"
+          shell: |
+            make -f install/install-sbbs.mk run
+            make -f install/install-sbbs.mk RELEASE=1 SYMLINK=1 NOCAP=1
+          args:
+            chdir: "{{ repo_dir }}"
+          environment:
+            SBBSDIR: "{{ sbbs_dir }}"
+          notify: restart sbbs
+
+      when: not symlink_check.stat.exists or (sbbs_check is defined and sbbs_check.rc != 0)
+
+    - name: Set capability on actual binary for binding to privileged ports
+      command: setcap cap_net_bind_service=+ep "{{ sbbs_binary }}"
+      become: yes
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Create SBBS log file
+      file:
+        path: /var/log/sbbs.log
+        state: touch
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: '0644'
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Configure rsyslog for SBBS logging
+      copy:
+        content: |
+          # SBBS logging configuration
+          local3.*                 /var/log/sbbs.log
+          # Exclude local3 from messages log
+          *.*;local3.none          /var/log/messages
+        dest: /etc/rsyslog.d/50-sbbs.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart rsyslog
+
+    - name: Configure SBBS LogFacility in sbbs.ini
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^(\s*)LogFacility\s*=\s*.*$'
+        line: '\1LogFacility = 3'
+        backrefs: yes
+      become_user: "{{ sbbs_user }}"
+      ignore_errors: yes
+      notify: restart sbbs
+
+    - name: Setup logrotate for SBBS logs
+      copy:
+        content: |
+          /var/log/sbbs*.log {
+              weekly
+              missingok
+              rotate 52
+              notifempty
+              create 640 {{ sbbs_user }} adm
+              sharedscripts
+              postrotate
+                  /bin/systemctl reload rsyslog > /dev/null
+              endscript
+          }
+        dest: /etc/logrotate.d/sbbs
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create systemd service file
+      template:
+        src: sbbs.service.j2
+        dest: /etc/systemd/system/sbbs.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Enable and start Synchronet SBBS service
+      systemd:
+        name: sbbs
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+
+    - name: restart sbbs
+      systemd:
+        name: sbbs
+        state: restarted
