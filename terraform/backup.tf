@@ -32,7 +32,7 @@ resource "aws_dlm_lifecycle_policy" "sbbs_backup" {
       copy_tags = true
     }
 
-    # Weekly snapshots - keep 1 (taken on Sunday)
+    # Weekly snapshots - keep 4 (taken on Sunday)
     schedule {
       name = "Weekly snapshots"
 
@@ -41,7 +41,7 @@ resource "aws_dlm_lifecycle_policy" "sbbs_backup" {
       }
 
       retain_rule {
-        count = 1
+        count = 4
       }
 
       tags_to_add = {

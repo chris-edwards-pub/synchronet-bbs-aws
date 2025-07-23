@@ -56,6 +56,7 @@
           - zip
           - unzip
           - telnet
+          - rsyslog
         state: present
 
     - name: Check if SBBS symlink exists
@@ -172,6 +173,12 @@
         mode: '0644'
       notify: restart rsyslog
 
+    - name: Start and enable rsyslog service
+      systemd:
+        name: rsyslog
+        state: started
+        enabled: yes
+
     - name: Configure SBBS LogFacility in sbbs.ini
       lineinfile:
         path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
@@ -190,10 +197,10 @@
               missingok
               rotate 52
               notifempty
-              create 640 {{ sbbs_user }} adm
+              create 640 {{ sbbs_user }} {{ sbbs_user }}
               sharedscripts
               postrotate
-                  /bin/systemctl reload rsyslog > /dev/null
+                  /bin/systemctl reload rsyslog > /dev/null 2>&1 || true
               endscript
           }
         dest: /etc/logrotate.d/sbbs
