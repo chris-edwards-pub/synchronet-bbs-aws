@@ -24,11 +24,27 @@
       group:
         name: sbbs
 
+    - name: Create mosquitto system group
+      group:
+        name: mosquitto
+        gid: 1883
+        system: yes
+
+    - name: Create mosquitto system user
+      user:
+        name: mosquitto
+        uid: 1883
+        group: mosquitto
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/mosquitto
+        create_home: no
+
     - name: Ensure sbbs user exists
       user:
         name: "{{ sbbs_user }}"
         shell: /bin/bash
-        groups: wheel,sbbs
+        groups: wheel,sbbs,docker
         append: "yes"
         create_home: "yes"
 
@@ -57,7 +73,271 @@
           - unzip
           - telnet
           - rsyslog
+          - docker
+          - python3-pip
+          - python3-cryptography
         state: present
+
+    - name: Install pyOpenSSL for certificate generation
+      pip:
+        name: pyOpenSSL
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Check if mosquitto config directory exists
+      stat:
+        path: /opt/mosquitto/config
+      register: mosquitto_config_dir_exists
+
+    - name: Create mosquitto config directory
+      file:
+        path: /opt/mosquitto/config
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: not mosquitto_config_dir_exists.stat.exists
+
+    - name: Ensure mosquitto config directory has correct ownership
+      file:
+        path: /opt/mosquitto/config
+        owner: root
+        group: root
+        mode: '0755'
+      when: mosquitto_config_dir_exists.stat.exists and (mosquitto_config_dir_exists.stat.uid != 0 or mosquitto_config_dir_exists.stat.gid != 0)
+
+    - name: Check if mosquitto data directory exists
+      stat:
+        path: /opt/mosquitto/data
+      register: mosquitto_data_dir_exists
+
+    - name: Create mosquitto data directory
+      file:
+        path: /opt/mosquitto/data
+        state: directory
+        owner: "1883"
+        group: "1883"
+        mode: '0755'
+      when: not mosquitto_data_dir_exists.stat.exists
+
+    - name: Ensure mosquitto data directory has correct ownership
+      file:
+        path: /opt/mosquitto/data
+        owner: "1883"
+        group: "1883"
+        mode: '0755'
+      when: mosquitto_data_dir_exists.stat.exists and (mosquitto_data_dir_exists.stat.uid != 1883 or mosquitto_data_dir_exists.stat.gid != 1883)
+
+    - name: Check if mosquitto log directory exists
+      stat:
+        path: /var/log/mosquitto
+      register: mosquitto_log_dir_exists
+
+    - name: Create mosquitto log directory
+      file:
+        path: /var/log/mosquitto
+        state: directory
+        owner: "1883"
+        group: "1883"
+        mode: '0755'
+      when: not mosquitto_log_dir_exists.stat.exists
+
+    - name: Ensure mosquitto log directory has correct ownership
+      file:
+        path: /var/log/mosquitto
+        owner: "1883"
+        group: "1883"
+        mode: '0755'
+      when: mosquitto_log_dir_exists.stat.exists and (mosquitto_log_dir_exists.stat.uid != 1883 or mosquitto_log_dir_exists.stat.gid != 1883)
+
+    - name: Check if mosquitto certs directory exists
+      stat:
+        path: /opt/mosquitto/certs
+      register: mosquitto_certs_dir_exists
+
+    - name: Create mosquitto certs directory
+      file:
+        path: /opt/mosquitto/certs
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: not mosquitto_certs_dir_exists.stat.exists
+
+    - name: Ensure mosquitto certs directory has correct ownership
+      file:
+        path: /opt/mosquitto/certs
+        owner: root
+        group: root
+        mode: '0755'
+      when: mosquitto_certs_dir_exists.stat.exists and (mosquitto_certs_dir_exists.stat.uid != 0 or mosquitto_certs_dir_exists.stat.gid != 0)
+
+    - name: Run Mosquitto MQTT broker in Docker
+      docker_container:
+        name: mosquitto
+        image: eclipse-mosquitto:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "1883:1883"
+          - "1884:1884"
+          - "8883:8883"
+          - "8884:8884"
+        volumes:
+          - "/opt/mosquitto/config:/mosquitto/config"
+          - "/opt/mosquitto/data:/mosquitto/data"
+          - "/var/log/mosquitto:/mosquitto/log"
+          - "/opt/mosquitto/certs:/mosquitto/certs"
+
+    # Generate CA certificate following Nelgin's guide
+    - name: Check if CA certificate already exists
+      stat:
+        path: /opt/mosquitto/certs/ca.crt
+      register: ca_cert_exists
+
+    - name: Generate CA private key with passphrase
+      openssl_privatekey:
+        path: /opt/mosquitto/certs/ca.key
+        size: 2048
+        type: RSA
+        passphrase: "{{ ansible_hostname }}MQTTca"
+        cipher: auto
+      when: not ca_cert_exists.stat.exists
+
+    - name: Generate CA certificate signing request
+      openssl_csr:
+        path: /opt/mosquitto/certs/ca.csr
+        privatekey_path: /opt/mosquitto/certs/ca.key
+        privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        common_name: "{{ ansible_fqdn }}"
+        organization_name: "Synchronet BBS"
+        country_name: "US"
+      when: not ca_cert_exists.stat.exists
+
+    - name: Generate CA certificate (self-signed)
+      openssl_certificate:
+        path: /opt/mosquitto/certs/ca.crt
+        privatekey_path: /opt/mosquitto/certs/ca.key
+        privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        csr_path: /opt/mosquitto/certs/ca.csr
+        provider: selfsigned
+        selfsigned_not_after: "+36500d"
+      when: not ca_cert_exists.stat.exists
+
+    # Generate server certificate following Nelgin's guide
+    - name: Check if server certificate already exists
+      stat:
+        path: /opt/mosquitto/certs/server.crt
+      register: server_cert_exists
+
+    - name: Generate server private key (no passphrase)
+      openssl_privatekey:
+        path: /opt/mosquitto/certs/server.key
+        size: 2048
+        type: RSA
+      when: not server_cert_exists.stat.exists
+
+    - name: Generate server certificate signing request
+      openssl_csr:
+        path: /opt/mosquitto/certs/server.csr
+        privatekey_path: /opt/mosquitto/certs/server.key
+        common_name: "mqtt.{{ ansible_fqdn }}"
+        organization_name: "Synchronet BBS"
+        country_name: "US"
+      when: not server_cert_exists.stat.exists
+
+    - name: Generate server certificate signed by CA
+      openssl_certificate:
+        path: /opt/mosquitto/certs/server.crt
+        privatekey_path: /opt/mosquitto/certs/server.key
+        csr_path: /opt/mosquitto/certs/server.csr
+        provider: ownca
+        ownca_path: /opt/mosquitto/certs/ca.crt
+        ownca_privatekey_path: /opt/mosquitto/certs/ca.key
+        ownca_privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        ownca_not_after: "+36500d"
+      when: not server_cert_exists.stat.exists
+
+    # Generate SBBS client certificates following Nelgin's guide
+    - name: Check if SBBS MQTT client certificate already exists
+      stat:
+        path: /opt/mosquitto/certs/sbbs_mqtt.crt
+      register: sbbs_cert_exists
+
+    - name: Generate SBBS MQTT client private key
+      openssl_privatekey:
+        path: /opt/mosquitto/certs/sbbs_mqtt.key
+        size: 2048
+        type: RSA
+      when: not sbbs_cert_exists.stat.exists
+
+    - name: Generate SBBS MQTT client certificate signing request
+      openssl_csr:
+        path: /opt/mosquitto/certs/sbbs_mqtt.csr
+        privatekey_path: /opt/mosquitto/certs/sbbs_mqtt.key
+        common_name: "{{ ansible_fqdn }}"
+        organization_name: "Synchronet BBS"
+        country_name: "US"
+      when: not sbbs_cert_exists.stat.exists
+
+    - name: Generate SBBS MQTT client certificate signed by CA
+      openssl_certificate:
+        path: /opt/mosquitto/certs/sbbs_mqtt.crt
+        privatekey_path: /opt/mosquitto/certs/sbbs_mqtt.key
+        csr_path: /opt/mosquitto/certs/sbbs_mqtt.csr
+        provider: ownca
+        ownca_path: /opt/mosquitto/certs/ca.crt
+        ownca_privatekey_path: /opt/mosquitto/certs/ca.key
+        ownca_privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        ownca_not_after: "+36500d"
+      when: not sbbs_cert_exists.stat.exists
+
+    - name: Check which certificate files exist
+      stat:
+        path: "{{ item }}"
+      register: cert_files_check
+      loop:
+        - /opt/mosquitto/certs/ca.crt
+        - /opt/mosquitto/certs/ca.key
+        - /opt/mosquitto/certs/server.crt
+        - /opt/mosquitto/certs/server.key
+        - /opt/mosquitto/certs/sbbs_mqtt.crt
+        - /opt/mosquitto/certs/sbbs_mqtt.key
+
+    - name: Set mosquitto certificate ownership
+      file:
+        path: "{{ item.item }}"
+        owner: "1883"
+        group: "1883"
+        mode: '0640'
+      loop: "{{ cert_files_check.results }}"
+      when: item.stat.exists
+
+    - name: Copy CA certificate to SBBS ctrl directory
+      copy:
+        src: /opt/mosquitto/certs/ca.crt
+        dest: "{{ sbbs_dir }}/ctrl/ca.crt"
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: '0644'
+        remote_src: yes
+
+    - name: Copy SBBS MQTT certificates to ctrl directory
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: '0600'
+        remote_src: yes
+      loop:
+        - { src: '/opt/mosquitto/certs/sbbs_mqtt.crt', dest: '{{ sbbs_dir }}/ctrl/sbbs_mqtt.crt' }
+        - { src: '/opt/mosquitto/certs/sbbs_mqtt.key', dest: '{{ sbbs_dir }}/ctrl/sbbs_mqtt.key' }
 
     - name: Check if SBBS symlink exists
       stat:
@@ -150,6 +430,11 @@
       ignore_errors: yes
       changed_when: false
 
+    - name: Check if SBBS log file exists
+      stat:
+        path: /var/log/sbbs.log
+      register: sbbs_log_exists
+
     - name: Create SBBS log file
       file:
         path: /var/log/sbbs.log
@@ -159,6 +444,7 @@
         mode: '0644'
         modification_time: preserve
         access_time: preserve
+      when: not sbbs_log_exists.stat.exists
 
     - name: Configure rsyslog for SBBS logging
       copy:
@@ -178,6 +464,195 @@
         name: rsyslog
         state: started
         enabled: yes
+
+    - name: Configure SSH session timeout (24 hours)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveInterval'
+        line: 'ClientAliveInterval 300'
+        backup: yes
+      notify: restart sshd
+
+    - name: Configure SSH max alive count for 24h timeout
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveCountMax'
+        line: 'ClientAliveCountMax 288'
+        backup: yes
+      notify: restart sshd
+
+    # MQTT Broker Configuration for Synchronet (Docker version)
+    - name: Check if MQTT password file exists
+      stat:
+        path: /opt/mosquitto/config/pwfile
+      register: mqtt_pwfile_check
+
+    - name: Prompt for MQTT password
+      pause:
+        prompt: "Enter MQTT password for user '{{ sbbs_user }}' (or press Enter for default 'sbbsmqtt')"
+        echo: no
+      register: mqtt_password_input
+      when: not mqtt_pwfile_check.stat.exists
+
+    - name: Set MQTT password fact
+      set_fact:
+        mqtt_password: "{{ mqtt_password_input.user_input if (mqtt_password_input.user_input is defined and mqtt_password_input.user_input != '') else 'sbbsmqtt' }}"
+      when: not mqtt_pwfile_check.stat.exists
+
+    - name: Create MQTT password for sbbs user
+      copy:
+        content: "{{ sbbs_user }}:{{ mqtt_password }}"
+        dest: /opt/mosquitto/config/pwfile
+        owner: root
+        group: root
+        mode: '0640'
+      register: mqtt_pwfile
+      when: not mqtt_pwfile_check.stat.exists
+
+    - name: Wait for Mosquitto container to be ready
+      wait_for:
+        port: 1883
+        host: localhost
+        delay: 5
+        timeout: 30
+      when: mqtt_pwfile.changed
+
+    - name: Hash the MQTT password file using Docker
+      command: docker exec mosquitto mosquitto_passwd -U /mosquitto/config/pwfile
+      when: mqtt_pwfile.changed
+      retries: 5
+      delay: 3
+      register: hash_result
+      until: hash_result.rc == 0
+      notify: restart mosquitto
+
+    - name: Ensure mosquitto container picks up new config
+      docker_container:
+        name: mosquitto
+        restart: yes
+      when: mqtt_pwfile.changed
+
+    - name: Check if mosquitto config file exists
+      stat:
+        path: /opt/mosquitto/config/mosquitto.conf
+      register: mosquitto_conf_exists
+
+    - name: Read existing mosquitto config if it exists
+      slurp:
+        src: /opt/mosquitto/config/mosquitto.conf
+      register: existing_mosquitto_config
+      when: mosquitto_conf_exists.stat.exists
+
+    - name: Set mosquitto config content
+      set_fact:
+        desired_mosquitto_config: |
+          # Synchronet MQTT Configuration with TLS
+          # Based on Nelgin's configuration from wiki.synchro.net
+          
+          # Disable anonymous access - require authentication
+          allow_anonymous false
+          password_file /mosquitto/config/pwfile
+          
+          # Logging
+          log_type debug
+          log_dest file /mosquitto/log/mosquitto.log
+          log_timestamp true
+          log_timestamp_format %Y-%m-%d %H:%M:%S
+          
+          # MQTT protocol standard port (non-TLS)
+          listener 1883
+          
+          # MQTT protocol SSL port (TLS)
+          listener 8883
+          tls_version tlsv1.2
+          cafile /mosquitto/certs/ca.crt
+          certfile /mosquitto/certs/server.crt
+          keyfile /mosquitto/certs/server.key
+          require_certificate true
+          use_identity_as_username false
+          
+          # WebSocket protocol standard port (non-TLS)
+          listener 1884
+          protocol websockets
+          socket_domain ipv4
+          
+          # WebSocket protocol SSL port (TLS)
+          listener 8884
+          protocol websockets
+          socket_domain ipv4
+          cafile /mosquitto/certs/ca.crt
+          certfile /mosquitto/certs/server.crt
+          keyfile /mosquitto/certs/server.key
+          require_certificate true
+          use_identity_as_username false
+          
+          # Persistence
+          persistence true
+          persistence_location /mosquitto/data/
+          
+          # Connection settings
+          max_keepalive 65535
+          max_connections 1000
+
+    - name: Configure Mosquitto for Synchronet
+      copy:
+        content: "{{ desired_mosquitto_config }}"
+        dest: /opt/mosquitto/config/mosquitto.conf
+        owner: root
+        group: root
+        mode: '0640'
+      notify: restart mosquitto
+      register: mosquitto_config_result
+      when: not mosquitto_conf_exists.stat.exists or (existing_mosquitto_config.content | b64decode | trim) != (desired_mosquitto_config | trim)
+
+    - name: Display MQTT setup information
+      debug:
+        msg: |
+          MQTT broker is running with TLS support (following Nelgin's guide).
+          Username: {{ sbbs_user }}
+          Password: {{ mqtt_password | default('sbbsmqtt') }}
+          
+          Non-TLS Connections:
+          MQTT Port: 1883
+          WebSocket Port: 1884
+          
+          TLS Connections (require client certificates):
+          MQTT TLS Port: 8883 (hostname: mqtt.{{ ansible_fqdn }})
+          WebSocket TLS Port: 8884 (hostname: mqtt.{{ ansible_fqdn }})
+          
+          Configuration Files:
+          Config: /opt/mosquitto/config/mosquitto.conf
+          Certificates: /opt/mosquitto/certs/
+          Logs: /var/log/mosquitto/mosquitto.log
+          
+          SBBS Configuration Files (copied to {{ sbbs_dir }}/ctrl/):
+          CA Certificate: {{ sbbs_dir }}/ctrl/ca.crt
+          Client Certificate: {{ sbbs_dir }}/ctrl/sbbs_mqtt.crt
+          Client Key: {{ sbbs_dir }}/ctrl/sbbs_mqtt.key
+          
+          For SCFG MQTT Configuration:
+          Broker_addr: mqtt.{{ ansible_fqdn }}
+          Broker_port: 8883
+          TLS_mode: 1
+          TLS_cafile: /sbbs/ctrl/ca.crt
+          TLS_certfile: /sbbs/ctrl/sbbs_mqtt.crt
+          TLS_keyfile: /sbbs/ctrl/sbbs_mqtt.key
+
+    - name: Check if mosquitto log file exists
+      stat:
+        path: /var/log/mosquitto/mosquitto.log
+      register: mosquitto_log_exists
+
+    - name: Set mosquitto log file permissions
+      file:
+        path: /var/log/mosquitto/mosquitto.log
+        state: touch
+        owner: "1883"
+        group: "1883"
+        mode: '0644'
+        modification_time: preserve
+        access_time: preserve
+      when: not mosquitto_log_exists.stat.exists
 
     - name: Configure SBBS LogFacility in sbbs.ini
       lineinfile:
@@ -208,6 +683,27 @@
         group: root
         mode: '0644'
 
+    - name: Setup logrotate for Mosquitto logs
+      copy:
+        content: |
+          /var/log/mosquitto/*.log {
+              weekly
+              missingok
+              rotate 52
+              notifempty
+              create 644 1883 1883
+              compress
+              delaycompress
+              sharedscripts
+              postrotate
+                  /usr/bin/docker exec mosquitto pkill -HUP mosquitto > /dev/null 2>&1 || true
+              endscript
+          }
+        dest: /etc/logrotate.d/mosquitto
+        owner: root
+        group: root
+        mode: '0644'
+
     - name: Create systemd service file
       template:
         src: sbbs.service.j2
@@ -222,7 +718,6 @@
         name: sbbs
         enabled: yes
         state: started
-        daemon_reload: yes
 
   handlers:
     - name: reload systemd
@@ -234,7 +729,17 @@
         name: rsyslog
         state: restarted
 
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+
     - name: restart sbbs
       systemd:
         name: sbbs
         state: restarted
+
+    - name: restart mosquitto
+      docker_container:
+        name: mosquitto
+        restart: yes
