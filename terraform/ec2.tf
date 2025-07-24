@@ -89,6 +89,22 @@ resource "aws_security_group" "sbbs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # MQTT port for Synchronet BBS monitoring
+  ingress {
+    from_port   = 1883
+    to_port     = 1883
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # MQTT WebSocket port for Synchronet BBS web interface
+  ingress {
+    from_port   = 1884
+    to_port     = 1884
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   # MQTT TLS port for secure connections
   ingress {
     from_port   = 8883
