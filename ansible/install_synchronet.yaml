@@ -76,6 +76,7 @@
           - docker
           - python3-pip
           - python3-cryptography
+          - nginx
         state: present
 
     - name: Install pyOpenSSL for certificate generation
@@ -83,11 +84,20 @@
         name: pyOpenSSL
         state: present
 
+    - name: Install certbot via pip
+      pip:
+        name: certbot
+        state: present
+
     - name: Start and enable Docker service
       systemd:
         name: docker
         state: started
         enabled: yes
+
+    - name: Set timezone to Central US (Chicago)
+      timezone:
+        name: America/Chicago
 
     - name: Check if mosquitto config directory exists
       stat:
@@ -189,10 +199,11 @@
           - "8883:8883"
           - "8884:8884"
         volumes:
-          - "/opt/mosquitto/config:/mosquitto/config"
+          - "/opt/mosquitto/config:/mosquitto/config:ro"
           - "/opt/mosquitto/data:/mosquitto/data"
           - "/var/log/mosquitto:/mosquitto/log"
-          - "/opt/mosquitto/certs:/mosquitto/certs"
+          - "/opt/mosquitto/certs:/mosquitto/certs:ro"
+        recreate: yes
 
     # Generate CA certificate following Nelgin's guide
     - name: Check if CA certificate already exists
@@ -235,6 +246,34 @@
         path: /opt/mosquitto/certs/server.crt
       register: server_cert_exists
 
+    - name: Check server certificate hostname
+      shell: openssl x509 -in /opt/mosquitto/certs/server.crt -text -noout | grep -E "Subject:|DNS:" || true
+      register: server_cert_check
+      when: server_cert_exists.stat.exists
+      changed_when: false
+
+    - name: Set fact for certificate regeneration needed
+      set_fact:
+        cert_regen_needed: "{{ server_cert_exists.stat.exists and 'bbs.c64.pub' not in server_cert_check.stdout }}"
+      when: server_cert_exists.stat.exists
+
+    - name: Remove existing certificates if hostname is wrong
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/mosquitto/certs/server.crt
+        - /opt/mosquitto/certs/server.csr
+        - /opt/mosquitto/certs/server.key
+        - /opt/mosquitto/certs/sbbs_mqtt.crt
+        - /opt/mosquitto/certs/sbbs_mqtt.csr
+        - /opt/mosquitto/certs/sbbs_mqtt.key
+      when: cert_regen_needed | default(false)
+
+    - name: Update server cert exists check after potential removal
+      set_fact:
+        server_cert_exists: "{{ {'stat': {'exists': false}} if cert_regen_needed | default(false) else server_cert_exists }}"
+
     - name: Generate server private key (no passphrase)
       openssl_privatekey:
         path: /opt/mosquitto/certs/server.key
@@ -246,7 +285,11 @@
       openssl_csr:
         path: /opt/mosquitto/certs/server.csr
         privatekey_path: /opt/mosquitto/certs/server.key
-        common_name: "mqtt.{{ ansible_fqdn }}"
+        common_name: "bbs.c64.pub"
+        subject_alt_name:
+          - "DNS:bbs.c64.pub"
+          - "DNS:mqtt.{{ ansible_fqdn }}"
+          - "DNS:{{ ansible_fqdn }}"
         organization_name: "Synchronet BBS"
         country_name: "US"
       when: not server_cert_exists.stat.exists
@@ -269,6 +312,10 @@
         path: /opt/mosquitto/certs/sbbs_mqtt.crt
       register: sbbs_cert_exists
 
+    - name: Update SBBS cert exists check after potential removal
+      set_fact:
+        sbbs_cert_exists: "{{ {'stat': {'exists': false}} if cert_regen_needed | default(false) else sbbs_cert_exists }}"
+
     - name: Generate SBBS MQTT client private key
       openssl_privatekey:
         path: /opt/mosquitto/certs/sbbs_mqtt.key
@@ -280,7 +327,10 @@
       openssl_csr:
         path: /opt/mosquitto/certs/sbbs_mqtt.csr
         privatekey_path: /opt/mosquitto/certs/sbbs_mqtt.key
-        common_name: "{{ ansible_fqdn }}"
+        common_name: "bbs.c64.pub"
+        subject_alt_name:
+          - "DNS:bbs.c64.pub"
+          - "DNS:{{ ansible_fqdn }}"
         organization_name: "Synchronet BBS"
         country_name: "US"
       when: not sbbs_cert_exists.stat.exists
@@ -554,8 +604,9 @@
           password_file /mosquitto/config/pwfile
           
           # Logging
-          log_type debug
+          log_type all
           log_dest file /mosquitto/log/mosquitto.log
+          log_dest stdout
           log_timestamp true
           log_timestamp_format %Y-%m-%d %H:%M:%S
           
@@ -568,7 +619,7 @@
           cafile /mosquitto/certs/ca.crt
           certfile /mosquitto/certs/server.crt
           keyfile /mosquitto/certs/server.key
-          require_certificate true
+          require_certificate false
           use_identity_as_username false
           
           # WebSocket protocol standard port (non-TLS)
@@ -576,14 +627,14 @@
           protocol websockets
           socket_domain ipv4
           
-          # WebSocket protocol SSL port (TLS)
+          # WebSocket protocol SSL port (TLS) - Browser accessible
           listener 8884
           protocol websockets
           socket_domain ipv4
           cafile /mosquitto/certs/ca.crt
           certfile /mosquitto/certs/server.crt
           keyfile /mosquitto/certs/server.key
-          require_certificate true
+          require_certificate false
           use_identity_as_username false
           
           # Persistence
@@ -617,8 +668,8 @@
           WebSocket Port: 1884
           
           TLS Connections (require client certificates):
-          MQTT TLS Port: 8883 (hostname: mqtt.{{ ansible_fqdn }})
-          WebSocket TLS Port: 8884 (hostname: mqtt.{{ ansible_fqdn }})
+          MQTT TLS Port: 8883 (hostname: bbs.c64.pub)
+          WebSocket TLS Port: 8884 (hostname: bbs.c64.pub)
           
           Configuration Files:
           Config: /opt/mosquitto/config/mosquitto.conf
@@ -631,7 +682,7 @@
           Client Key: {{ sbbs_dir }}/ctrl/sbbs_mqtt.key
           
           For SCFG MQTT Configuration:
-          Broker_addr: mqtt.{{ ansible_fqdn }}
+          Broker_addr: bbs.c64.pub
           Broker_port: 8883
           TLS_mode: 1
           TLS_cafile: /sbbs/ctrl/ca.crt
@@ -713,6 +764,224 @@
         mode: "0644"
       notify: reload systemd
 
+    # Nginx Reverse Proxy Setup with Let's Encrypt SSL
+    - name: Check if Let's Encrypt certificate already exists
+      stat:
+        path: /etc/letsencrypt/live/bbs.c64.pub/fullchain.pem
+      register: letsencrypt_cert
+
+    - name: Stop nginx and SBBS temporarily for initial certificate generation
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - nginx
+        - sbbs
+      when: not letsencrypt_cert.stat.exists
+
+    - name: Obtain Let's Encrypt certificate (standalone mode)
+      command: >
+        certbot certonly
+        --standalone
+        --non-interactive
+        --agree-tos
+        --email chris@edwards.pub
+        --domains bbs.c64.pub
+      when: not letsencrypt_cert.stat.exists
+      register: certbot_result
+
+    # Configure Synchronet to listen on port 8080 instead of 80 for nginx reverse proxy
+    - name: Configure Synchronet web server port to 8080
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^(\s*)Port\s*=\s*80\s*$'
+        line: '\1Port = 8080'
+        backrefs: yes
+      become_user: "{{ sbbs_user }}"
+      notify: restart sbbs
+
+    - name: Create nginx configuration for Synchronet BBS
+      copy:
+        content: |
+          server {
+              listen 80;
+              server_name bbs.c64.pub;
+              
+              # Redirect HTTP to HTTPS
+              return 301 https://$server_name$request_uri;
+          }
+          
+          server {
+              listen 443 ssl http2;
+              server_name bbs.c64.pub;
+              
+              # SSL configuration
+              ssl_certificate /etc/letsencrypt/live/bbs.c64.pub/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/bbs.c64.pub/privkey.pem;
+              ssl_protocols TLSv1.2 TLSv1.3;
+              ssl_ciphers TLS-CHACHA20-POLY1305-SHA256:TLS-AES-256-GCM-SHA384:TLS-AES-128-GCM-SHA256:HIGH:!aNULL:!MD5;
+              ssl_prefer_server_ciphers on;
+              ssl_session_cache shared:SSL:1m;
+              ssl_session_timeout 5m;
+              
+              # Security headers
+              add_header X-Frame-Options DENY;
+              add_header X-Content-Type-Options nosniff;
+              add_header X-XSS-Protection "1; mode=block";
+              add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+              
+              # Proxy to Synchronet
+              location / {
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header Host $http_host;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_pass http://127.0.0.1:8080;
+                  
+                  # Websocket support
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+              }
+              
+              # Optional: Handle API calls specifically
+              location /api/ {
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $remote_addr;
+                  proxy_set_header Host $host;
+                  proxy_pass http://127.0.0.1:8080/api/;
+              }
+          }
+        dest: /etc/nginx/conf.d/synchronet.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart nginx
+
+    - name: Remove default nginx site
+      file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+      notify: restart nginx
+
+    - name: Test nginx configuration
+      command: nginx -t
+      register: nginx_test
+      changed_when: false
+
+    - name: Create certificate renewal script for nginx
+      copy:
+        content: |
+          #!/bin/bash
+          # Let's Encrypt renewal script for nginx reverse proxy
+          
+          set -euo pipefail
+          
+          echo "Starting SSL certificate renewal process for bbs.c64.pub"
+          
+          # Stop nginx to free up ports 80/443
+          echo "Stopping nginx service..."
+          systemctl stop nginx
+          
+          # Renew certificate
+          echo "Attempting certificate renewal..."
+          if certbot renew --standalone --quiet; then
+              echo "Certificate renewal successful"
+          else
+              echo "Certificate renewal failed or not needed"
+          fi
+          
+          # Restart nginx
+          echo "Starting nginx service..."
+          systemctl start nginx
+          
+          echo "SSL certificate renewal process completed"
+        dest: /usr/local/bin/renew-nginx-ssl.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create systemd service for SSL certificate renewal
+      copy:
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates for nginx reverse proxy
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/renew-nginx-ssl.sh
+          User=root
+          StandardOutput=journal
+          StandardError=journal
+        dest: /etc/systemd/system/renew-nginx-ssl.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for SSL certificate renewal
+      copy:
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates for nginx reverse proxy
+          Requires=renew-nginx-ssl.service
+          
+          [Timer]
+          # Run daily at 2:30 AM
+          OnCalendar=*-*-* 02:30:00
+          # Add randomization to avoid all servers hitting Let's Encrypt at once
+          RandomizedDelaySec=1800
+          # Catch up if system was down
+          Persistent=true
+          
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/renew-nginx-ssl.timer
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start SSL renewal timer
+      systemd:
+        name: renew-nginx-ssl.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Display SSL certificate setup information
+      debug:
+        msg: |
+          Nginx reverse proxy with Let's Encrypt SSL configured for Synchronet BBS!
+          
+          Web Interface URLs:
+          HTTP: http://bbs.c64.pub (will redirect to HTTPS)
+          HTTPS: https://bbs.c64.pub
+          
+          Configuration:
+          - Nginx handles SSL termination with Let's Encrypt certificates on port 80/443
+          - Synchronet runs HTTP-only on localhost:8080
+          - All traffic is proxied through nginx with proper headers
+          
+          Certificate will auto-renew daily via systemd timer.
+          
+          Check renewal status with:
+          - systemctl status renew-nginx-ssl.timer
+          - systemctl status renew-nginx-ssl.service
+          - journalctl -u renew-nginx-ssl.service
+          
+          Nginx configuration: /etc/nginx/conf.d/synchronet.conf
+          Direct Synchronet access (for debugging): http://localhost:8080
+      when: not letsencrypt_cert.stat.exists
+
+    - name: Start and enable nginx service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
     - name: Enable and start Synchronet SBBS service
       systemd:
         name: sbbs
@@ -743,3 +1012,8 @@
       docker_container:
         name: mosquitto
         restart: yes
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
