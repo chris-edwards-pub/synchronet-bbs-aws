@@ -159,6 +159,16 @@
             SBBSDIR: "{{ sbbs_dir }}"
           notify: restart sbbs
 
+    - name: Set TelnetInterface for BBS in sbbs.ini
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^([ \t]*)TelnetInterface[ \t]*=.*$'
+        line: '\1TelnetInterface = 0.0.0.0,0.0.0.0:64,0.0.0.0:128'
+        backrefs: yes
+      become_user: "{{ sbbs_user }}"
+      ignore_errors: yes
+      notify: restart sbbs
+
       when: not symlink_check.stat.exists or (sbbs_check is defined and sbbs_check.rc != 0)
 
     - name: Set capability on actual binary for binding to privileged ports
