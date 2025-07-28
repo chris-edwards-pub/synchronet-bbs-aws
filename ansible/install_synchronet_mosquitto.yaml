@@ -1,0 +1,1301 @@
+---
+# Ansible playbook to install and configure Synchronet BBS
+# This playbook will:
+# - Create sbbs user and set up dependencies
+# - Install Synchronet from source
+# - Configure basic runtime environment
+# Only rebuilds/reinstalls if sbbs binary is missing or non-functional
+
+- hosts: all
+  become: "yes"
+  vars:
+    ansible_become_method: sudo
+    ansible_become_flags: "-H -S -n"
+    ansible_python_interpreter: auto_silent
+    ansible_become_pass: ""
+    sbbs_user: sbbs
+    sbbs_home: /home/{{ sbbs_user }}
+    sbbs_dir: "{{ sbbs_home }}/sbbs"
+    repo_dir: "{{ sbbs_dir }}/repo"
+    sbbs_symlink: "{{ sbbs_dir }}/exec/sbbs"
+    bbs_hostname: bbs.c64.pub
+
+  tasks:
+    - name: Add Group sbbs
+      group:
+        name: sbbs
+
+    - name: Create mosquitto system group
+      group:
+        name: mosquitto
+        gid: 1883
+        system: yes
+
+    - name: Create mosquitto system user
+      user:
+        name: mosquitto
+        uid: 1883
+        group: mosquitto
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/mosquitto
+        create_home: no
+
+    - name: Ensure sbbs user exists
+      user:
+        name: "{{ sbbs_user }}"
+        shell: /bin/bash
+        groups: wheel,sbbs,docker
+        append: "yes"
+        create_home: "yes"
+
+    - name: Configure passwordless sudo for sbbs user
+      lineinfile:
+        path: /etc/sudoers.d/sbbs
+        line: "{{ sbbs_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: yes
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: Install system dependencies
+      dnf:
+        name:
+          - git
+          - "@Development Tools"
+          - pkg-config
+          - ncurses-devel
+          - libarchive-devel
+          - openssl-devel
+          - libcurl-devel
+          - nspr-devel
+          - nss-devel
+          - libcap-devel
+          - zip
+          - unzip
+          - telnet
+          - rsyslog
+          - docker
+          - python3-pip
+          - python3-cryptography
+        state: present
+
+    - name: Install pyOpenSSL for certificate generation
+      pip:
+        name: pyOpenSSL
+        state: present
+
+    - name: Install certbot via pip
+      pip:
+        name: certbot
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Set timezone to Central US (Chicago)
+      timezone:
+        name: America/Chicago
+
+    - name: Check if mosquitto config directory exists
+      stat:
+        path: /opt/mosquitto/config
+      register: mosquitto_config_dir_exists
+
+    - name: Create mosquitto config directory
+      file:
+        path: /opt/mosquitto/config
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: not mosquitto_config_dir_exists.stat.exists
+
+    - name: Ensure mosquitto config directory has correct ownership
+      file:
+        path: /opt/mosquitto/config
+        owner: root
+        group: root
+        mode: "0755"
+      when: mosquitto_config_dir_exists.stat.exists and (mosquitto_config_dir_exists.stat.uid != 0 or mosquitto_config_dir_exists.stat.gid != 0)
+
+    - name: Check if mosquitto data directory exists
+      stat:
+        path: /opt/mosquitto/data
+      register: mosquitto_data_dir_exists
+
+    - name: Create mosquitto data directory
+      file:
+        path: /opt/mosquitto/data
+        state: directory
+        owner: "1883"
+        group: "1883"
+        mode: "0755"
+      when: not mosquitto_data_dir_exists.stat.exists
+
+    - name: Ensure mosquitto data directory has correct ownership
+      file:
+        path: /opt/mosquitto/data
+        owner: "1883"
+        group: "1883"
+        mode: "0755"
+      when: mosquitto_data_dir_exists.stat.exists and (mosquitto_data_dir_exists.stat.uid != 1883 or mosquitto_data_dir_exists.stat.gid != 1883)
+
+    - name: Check if mosquitto log directory exists
+      stat:
+        path: /var/log/mosquitto
+      register: mosquitto_log_dir_exists
+
+    - name: Create mosquitto log directory
+      file:
+        path: /var/log/mosquitto
+        state: directory
+        owner: "1883"
+        group: "1883"
+        mode: "0755"
+      when: not mosquitto_log_dir_exists.stat.exists
+
+    - name: Ensure mosquitto log directory has correct ownership
+      file:
+        path: /var/log/mosquitto
+        owner: "1883"
+        group: "1883"
+        mode: "0755"
+      when: mosquitto_log_dir_exists.stat.exists and (mosquitto_log_dir_exists.stat.uid != 1883 or mosquitto_log_dir_exists.stat.gid != 1883)
+
+    - name: Check if mosquitto certs directory exists
+      stat:
+        path: /opt/mosquitto/certs
+      register: mosquitto_certs_dir_exists
+
+    - name: Create mosquitto certs directory
+      file:
+        path: /opt/mosquitto/certs
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: not mosquitto_certs_dir_exists.stat.exists
+
+    - name: Ensure mosquitto certs directory has correct ownership
+      file:
+        path: /opt/mosquitto/certs
+        owner: root
+        group: root
+        mode: "0755"
+      when: mosquitto_certs_dir_exists.stat.exists and (mosquitto_certs_dir_exists.stat.uid != 0 or mosquitto_certs_dir_exists.stat.gid != 0)
+
+    - name: Create basic Mosquitto configuration for initial startup
+      copy:
+        content: |
+          # Basic Mosquitto configuration for initial startup
+          # This will be replaced with full configuration later
+          
+          # Allow anonymous access initially (will be changed later)
+          allow_anonymous true
+          
+          # Basic MQTT listener
+          listener 1883
+          
+          # Logging
+          log_type all
+          log_dest file /mosquitto/log/mosquitto.log
+          log_dest stdout
+        dest: /opt/mosquitto/config/mosquitto.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Run Mosquitto MQTT broker in Docker
+      docker_container:
+        name: mosquitto
+        image: eclipse-mosquitto:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "1883:1883"
+          - "1884:1884"
+          - "8883:8883"
+          - "8884:8884"
+        volumes:
+          - "/opt/mosquitto/config:/mosquitto/config:ro"
+          - "/opt/mosquitto/data:/mosquitto/data"
+          - "/var/log/mosquitto:/mosquitto/log"
+          - "/opt/mosquitto/certs:/mosquitto/certs:ro"
+        recreate: yes
+
+    # Generate CA certificate following Nelgin's guide
+    - name: Check if CA certificate already exists
+      stat:
+        path: /opt/mosquitto/certs/ca.crt
+      register: ca_cert_exists
+
+    - name: Generate CA private key with passphrase
+      openssl_privatekey:
+        path: /opt/mosquitto/certs/ca.key
+        size: 2048
+        type: RSA
+        passphrase: "{{ ansible_hostname }}MQTTca"
+        cipher: auto
+      when: not ca_cert_exists.stat.exists
+
+    - name: Generate CA certificate signing request
+      openssl_csr:
+        path: /opt/mosquitto/certs/ca.csr
+        privatekey_path: /opt/mosquitto/certs/ca.key
+        privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        common_name: "{{ ansible_fqdn }}"
+        organization_name: "Synchronet BBS"
+        country_name: "US"
+      when: not ca_cert_exists.stat.exists
+
+    - name: Generate CA certificate (self-signed)
+      openssl_certificate:
+        path: /opt/mosquitto/certs/ca.crt
+        privatekey_path: /opt/mosquitto/certs/ca.key
+        privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        csr_path: /opt/mosquitto/certs/ca.csr
+        provider: selfsigned
+        selfsigned_not_after: "+36500d"
+      when: not ca_cert_exists.stat.exists
+
+    # Generate server certificate following Nelgin's guide
+    - name: Check if server certificate already exists
+      stat:
+        path: /opt/mosquitto/certs/server.crt
+      register: server_cert_exists
+
+    - name: Check server certificate hostname
+      shell: openssl x509 -in /opt/mosquitto/certs/server.crt -text -noout | grep -E "Subject:|DNS:" || true
+      register: server_cert_check
+      when: server_cert_exists.stat.exists
+      changed_when: false
+
+    - name: Set fact for certificate regeneration needed
+      set_fact:
+        cert_regen_needed: "{{ server_cert_exists.stat.exists and bbs_hostname not in server_cert_check.stdout }}"
+      when: server_cert_exists.stat.exists
+
+    - name: Remove existing certificates if hostname is wrong
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/mosquitto/certs/server.crt
+        - /opt/mosquitto/certs/server.csr
+        - /opt/mosquitto/certs/server.key
+        - /opt/mosquitto/certs/sbbs_mqtt.crt
+        - /opt/mosquitto/certs/sbbs_mqtt.csr
+        - /opt/mosquitto/certs/sbbs_mqtt.key
+      when: cert_regen_needed | default(false)
+
+    - name: Update server cert exists check after potential removal
+      set_fact:
+        server_cert_exists: "{{ {'stat': {'exists': false}} if cert_regen_needed | default(false) else server_cert_exists }}"
+
+    - name: Generate server private key (no passphrase)
+      openssl_privatekey:
+        path: /opt/mosquitto/certs/server.key
+        size: 2048
+        type: RSA
+      when: not server_cert_exists.stat.exists
+
+    - name: Generate server certificate signing request
+      openssl_csr:
+        path: /opt/mosquitto/certs/server.csr
+        privatekey_path: /opt/mosquitto/certs/server.key
+        common_name: "{{ bbs_hostname }}"
+        subject_alt_name:
+          - "DNS:{{ bbs_hostname }}"
+          - "DNS:mqtt.{{ ansible_fqdn }}"
+          - "DNS:{{ ansible_fqdn }}"
+        organization_name: "Synchronet BBS"
+        country_name: "US"
+      when: not server_cert_exists.stat.exists
+
+    - name: Generate server certificate signed by CA
+      openssl_certificate:
+        path: /opt/mosquitto/certs/server.crt
+        privatekey_path: /opt/mosquitto/certs/server.key
+        csr_path: /opt/mosquitto/certs/server.csr
+        provider: ownca
+        ownca_path: /opt/mosquitto/certs/ca.crt
+        ownca_privatekey_path: /opt/mosquitto/certs/ca.key
+        ownca_privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        ownca_not_after: "+36500d"
+      when: not server_cert_exists.stat.exists
+
+    # Generate SBBS client certificates following Nelgin's guide
+    - name: Check if SBBS MQTT client certificate already exists
+      stat:
+        path: /opt/mosquitto/certs/sbbs_mqtt.crt
+      register: sbbs_cert_exists
+
+    - name: Update SBBS cert exists check after potential removal
+      set_fact:
+        sbbs_cert_exists: "{{ {'stat': {'exists': false}} if cert_regen_needed | default(false) else sbbs_cert_exists }}"
+
+    - name: Generate SBBS MQTT client private key
+      openssl_privatekey:
+        path: /opt/mosquitto/certs/sbbs_mqtt.key
+        size: 2048
+        type: RSA
+      when: not sbbs_cert_exists.stat.exists
+
+    - name: Generate SBBS MQTT client certificate signing request
+      openssl_csr:
+        path: /opt/mosquitto/certs/sbbs_mqtt.csr
+        privatekey_path: /opt/mosquitto/certs/sbbs_mqtt.key
+        common_name: "{{ bbs_hostname }}"
+        subject_alt_name:
+          - "DNS:{{ bbs_hostname }}"
+          - "DNS:{{ ansible_fqdn }}"
+        organization_name: "Synchronet BBS"
+        country_name: "US"
+      when: not sbbs_cert_exists.stat.exists
+
+    - name: Generate SBBS MQTT client certificate signed by CA
+      openssl_certificate:
+        path: /opt/mosquitto/certs/sbbs_mqtt.crt
+        privatekey_path: /opt/mosquitto/certs/sbbs_mqtt.key
+        csr_path: /opt/mosquitto/certs/sbbs_mqtt.csr
+        provider: ownca
+        ownca_path: /opt/mosquitto/certs/ca.crt
+        ownca_privatekey_path: /opt/mosquitto/certs/ca.key
+        ownca_privatekey_passphrase: "{{ ansible_hostname }}MQTTca"
+        ownca_not_after: "+36500d"
+      when: not sbbs_cert_exists.stat.exists
+
+    - name: Check which certificate files exist
+      stat:
+        path: "{{ item }}"
+      register: cert_files_check
+      loop:
+        - /opt/mosquitto/certs/ca.crt
+        - /opt/mosquitto/certs/ca.key
+        - /opt/mosquitto/certs/server.crt
+        - /opt/mosquitto/certs/server.key
+        - /opt/mosquitto/certs/sbbs_mqtt.crt
+        - /opt/mosquitto/certs/sbbs_mqtt.key
+
+    - name: Set mosquitto certificate ownership
+      file:
+        path: "{{ item.item }}"
+        owner: "1883"
+        group: "1883"
+        mode: "0640"
+      loop: "{{ cert_files_check.results }}"
+      when: item.stat.exists
+
+    - name: Check if SBBS symlink exists
+      stat:
+        path: "{{ sbbs_symlink }}"
+        follow: no
+      register: symlink_check
+
+    - name: Get sbbs binary path from symlink
+      command: readlink -f {{ sbbs_symlink }}
+      register: sbbs_binary_path
+      ignore_errors: yes
+      when: symlink_check.stat.exists
+      changed_when: false
+
+    - name: Set binary path fact
+      set_fact:
+        sbbs_binary: "{{ sbbs_binary_path.stdout | default(repo_dir + '/src/sbbs3/gcc.linux.x64.exe.release/sbbs') }}"
+
+    - name: Check if sbbs binary exists and works
+      become_user: "{{ sbbs_user }}"
+      command: "{{ sbbs_binary }} version"
+      register: sbbs_check
+      ignore_errors: yes
+      changed_when: false
+      when: symlink_check.stat.exists
+
+    - name: Display SBBS version
+      debug:
+        msg: "{{ sbbs_check.stdout }}"
+      when: sbbs_check is defined and sbbs_check.stdout is defined and sbbs_check.rc == 0
+
+    - name: Configure environment
+      lineinfile:
+        path: "{{ sbbs_home }}/.bashrc"
+        line: export SBBSCTRL={{ sbbs_dir }}/ctrl
+        insertafter: EOF
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: "0644"
+
+    - block:
+        - name: Create synchronet directory
+          become_user: "{{ sbbs_user }}"
+          file:
+            path: "{{ sbbs_dir }}"
+            state: directory
+            owner: "{{ sbbs_user }}"
+            group: "{{ sbbs_user }}"
+
+        - name: Clean up previous installation
+          become_user: "{{ sbbs_user }}"
+          shell: |
+            rm -rf ctrl docs exec node? text web webv4 xtrn mods repo
+          args:
+            chdir: "{{ sbbs_dir }}"
+          ignore_errors: yes
+
+        - name: Clone Synchronet source repo to repo subdirectory
+          become_user: "{{ sbbs_user }}"
+          git:
+            repo: https://gitlab.synchro.net/main/sbbs.git
+            dest: "{{ repo_dir }}"
+            version: master
+            update: "yes"
+            force: yes
+
+        - name: Build Synchronet (all components)
+          become_user: "{{ sbbs_user }}"
+          shell: |
+            make -j{{ ansible_processor_cores }} RELEASE=1
+          args:
+            chdir: "{{ repo_dir }}/src/sbbs3"
+
+        - name: Create runtime directories and install Synchronet
+          become_user: "{{ sbbs_user }}"
+          shell: |
+            make -f install/install-sbbs.mk run
+            make -f install/install-sbbs.mk RELEASE=1 SYMLINK=1 NOCAP=1
+          args:
+            chdir: "{{ repo_dir }}"
+          environment:
+            SBBSDIR: "{{ sbbs_dir }}"
+          notify: restart sbbs
+
+      when: not symlink_check.stat.exists or (sbbs_check is defined and sbbs_check.rc != 0)
+
+    - name: Set capability on actual binary for binding to privileged ports
+      command: setcap cap_net_bind_service=+ep "{{ sbbs_binary }}"
+      become: yes
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Create symbolic link to scfg in sbbs home directory
+      file:
+        src: "{{ sbbs_dir }}/exec/scfg"
+        dest: "{{ sbbs_home }}/scfg"
+        state: link
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+      become_user: "{{ sbbs_user }}"
+
+    - name: Copy CA certificate to SBBS ctrl directory
+      copy:
+        src: /opt/mosquitto/certs/ca.crt
+        dest: "{{ sbbs_dir }}/ctrl/ca.crt"
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: "0644"
+        remote_src: yes
+
+    - name: Copy SBBS MQTT certificates to ctrl directory
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: "0600"
+        remote_src: yes
+      loop:
+        - {
+            src: "/opt/mosquitto/certs/sbbs_mqtt.crt",
+            dest: "{{ sbbs_dir }}/ctrl/sbbs_mqtt.crt",
+          }
+        - {
+            src: "/opt/mosquitto/certs/sbbs_mqtt.key",
+            dest: "{{ sbbs_dir }}/ctrl/sbbs_mqtt.key",
+          }
+
+    - name: Check if SBBS log file exists
+      stat:
+        path: /var/log/sbbs.log
+      register: sbbs_log_exists
+
+    - name: Create SBBS log file
+      file:
+        path: /var/log/sbbs.log
+        state: touch
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+      when: not sbbs_log_exists.stat.exists
+
+    - name: Configure rsyslog for SBBS logging
+      copy:
+        content: |
+          # SBBS logging configuration
+          local3.*                 /var/log/sbbs.log
+          # Exclude local3 from messages log
+          *.*;local3.none          /var/log/messages
+        dest: /etc/rsyslog.d/50-sbbs.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart rsyslog
+
+    - name: Start and enable rsyslog service
+      systemd:
+        name: rsyslog
+        state: started
+        enabled: yes
+
+    - name: Configure SSH session timeout (24 hours)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?ClientAliveInterval"
+        line: "ClientAliveInterval 300"
+        backup: yes
+      notify: restart sshd
+
+    - name: Configure SSH max alive count for 24h timeout
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?ClientAliveCountMax"
+        line: "ClientAliveCountMax 288"
+        backup: yes
+      notify: restart sshd
+
+    # MQTT Broker Configuration for Synchronet (Docker version)
+    - name: Check if MQTT password file exists
+      stat:
+        path: /opt/mosquitto/config/pwfile
+      register: mqtt_pwfile_check
+
+    - name: Prompt for MQTT password
+      pause:
+        prompt: "Enter MQTT password for user '{{ sbbs_user }}' (or press Enter for default 'sbbsmqtt')"
+        echo: no
+      register: mqtt_password_input
+      when: not mqtt_pwfile_check.stat.exists
+
+    - name: Set MQTT password fact
+      set_fact:
+        mqtt_password: "{{ mqtt_password_input.user_input if (mqtt_password_input.user_input is defined and mqtt_password_input.user_input != '') else 'sbbsmqtt' }}"
+      when: not mqtt_pwfile_check.stat.exists
+
+    - name: Create MQTT password for sbbs user
+      copy:
+        content: "{{ sbbs_user }}:{{ mqtt_password }}"
+        dest: /opt/mosquitto/config/pwfile
+        owner: root
+        group: root
+        mode: "0640"
+      register: mqtt_pwfile
+      when: not mqtt_pwfile_check.stat.exists
+
+    - name: Check Mosquitto container status before waiting
+      command: docker ps --filter name=mosquitto --format "{{ '{{' }}.Status{{ '}}' }}"
+      register: mosquitto_status
+      ignore_errors: yes
+      when: mqtt_pwfile.changed
+
+    - name: Display Mosquitto container status
+      debug:
+        msg: "Mosquitto container status: {{ mosquitto_status.stdout | default('Not found') }}"
+      when: mqtt_pwfile.changed
+
+    - name: Check Mosquitto container logs if not running
+      command: docker logs mosquitto
+      register: mosquitto_logs
+      ignore_errors: yes
+      when: mqtt_pwfile.changed and (mosquitto_status.stdout is not defined or 'Up' not in mosquitto_status.stdout)
+
+    - name: Display Mosquitto container logs
+      debug:
+        msg: "Mosquitto logs: {{ mosquitto_logs.stdout_lines | default(['No logs available']) }}"
+      when: mqtt_pwfile.changed and mosquitto_logs is defined
+
+    - name: Wait for Mosquitto container to be ready
+      wait_for:
+        port: 1883
+        host: localhost
+        delay: 5
+        timeout: 60
+      when: mqtt_pwfile.changed
+      ignore_errors: yes
+      register: mosquitto_wait_result
+
+    - name: Check if Mosquitto wait failed and get more diagnostics
+      block:
+        - name: Get detailed container status
+          command: docker inspect mosquitto --format "{{ '{{' }}.State.Status{{ '}}' }}"
+          register: container_status
+          ignore_errors: yes
+
+        - name: Get container logs
+          command: docker logs --tail 50 mosquitto
+          register: container_logs
+          ignore_errors: yes
+
+        - name: Display diagnostic information
+          debug:
+            msg: |
+              Mosquitto container diagnostics:
+              Container Status: {{ container_status.stdout | default('Unknown') }}
+              Container Logs (last 50 lines):
+              {{ container_logs.stdout_lines | default(['No logs available']) | join('\n') }}
+
+        - name: Restart Mosquitto container
+          docker_container:
+            name: mosquitto
+            restart: yes
+
+        - name: Wait for Mosquitto after restart
+          wait_for:
+            port: 1883
+            host: localhost
+            delay: 10
+            timeout: 30
+      when: mqtt_pwfile.changed and (mosquitto_wait_result is defined and mosquitto_wait_result.failed)
+
+    - name: Hash the MQTT password file using Docker
+      command: docker exec mosquitto mosquitto_passwd -U /mosquitto/config/pwfile
+      when: mqtt_pwfile.changed
+      retries: 5
+      delay: 3
+      register: hash_result
+      until: hash_result.rc == 0
+      notify: restart mosquitto
+
+    - name: Ensure mosquitto container picks up new config
+      docker_container:
+        name: mosquitto
+        restart: yes
+      when: mqtt_pwfile.changed
+
+    - name: Check if mosquitto config file exists
+      stat:
+        path: /opt/mosquitto/config/mosquitto.conf
+      register: mosquitto_conf_exists
+
+    - name: Read existing mosquitto config if it exists
+      slurp:
+        src: /opt/mosquitto/config/mosquitto.conf
+      register: existing_mosquitto_config
+      when: mosquitto_conf_exists.stat.exists
+
+    - name: Set mosquitto config content
+      set_fact:
+        desired_mosquitto_config: |
+          # Synchronet MQTT Configuration with Let's Encrypt TLS
+          # Based on Nelgin's configuration from wiki.synchro.net
+
+          # Disable anonymous access - require authentication
+          allow_anonymous false
+          password_file /mosquitto/config/pwfile
+
+          # Logging
+          log_type all
+          log_dest file /mosquitto/log/mosquitto.log
+          log_dest stdout
+          log_timestamp true
+          log_timestamp_format %Y-%m-%d %H:%M:%S
+
+          # MQTT protocol standard port (non-TLS)
+          listener 1883
+
+          # MQTT protocol SSL port (TLS) - Using Let's Encrypt certificates
+          listener 8883
+          tls_version tlsv1.2
+          cafile /mosquitto/certs/mqtt-ca-chain.pem
+          certfile /mosquitto/certs/mqtt-server-cert.pem
+          keyfile /mosquitto/certs/mqtt-server-key.pem
+          require_certificate false
+          use_identity_as_username false
+
+          # WebSocket protocol standard port (non-TLS)
+          listener 1884
+          protocol websockets
+          socket_domain ipv4
+
+          # WebSocket protocol SSL port (TLS) - Using Let's Encrypt certificates
+          listener 8884
+          protocol websockets
+          socket_domain ipv4
+          cafile /mosquitto/certs/mqtt-ca-chain.pem
+          certfile /mosquitto/certs/mqtt-server-cert.pem
+          keyfile /mosquitto/certs/mqtt-server-key.pem
+          require_certificate false
+          use_identity_as_username false
+
+          # Persistence
+          persistence true
+          persistence_location /mosquitto/data/
+
+          # Connection settings
+          max_keepalive 65535
+          max_connections 1000
+
+    - name: Configure Mosquitto for Synchronet
+      copy:
+        content: "{{ desired_mosquitto_config }}"
+        dest: /opt/mosquitto/config/mosquitto.conf
+        owner: root
+        group: root
+        mode: "0640"
+      notify: restart mosquitto
+      register: mosquitto_config_result
+      when: not mosquitto_conf_exists.stat.exists or (existing_mosquitto_config.content | b64decode | trim) != (desired_mosquitto_config | trim)
+
+    - name: Display MQTT setup information
+      debug:
+        msg: |
+          MQTT broker is running with Let's Encrypt TLS certificates!
+          Username: {{ sbbs_user }}
+          Password: {{ mqtt_password | default('sbbsmqtt') }}
+
+          Non-TLS Connections:
+          MQTT Port: 1883
+          WebSocket Port: 1884
+
+          TLS Connections (using Let's Encrypt certificates):
+          MQTT TLS Port: 8883 (hostname: {{ bbs_hostname }})
+          WebSocket TLS Port: 8884 (hostname: {{ bbs_hostname }})
+
+          Configuration Files:
+          Config: /opt/mosquitto/config/mosquitto.conf
+          
+          MQTT SSL Certificates (clearly named):
+          - Server Certificate: /opt/mosquitto/certs/mqtt-server-cert.pem
+          - Server Private Key: /opt/mosquitto/certs/mqtt-server-key.pem  
+          - CA Chain: /opt/mosquitto/certs/mqtt-ca-chain.pem
+          
+          Self-signed Certificates (for development):
+          - CA Certificate: /opt/mosquitto/certs/ca.crt
+          - Server Certificate: /opt/mosquitto/certs/server.crt
+          - Server Private Key: /opt/mosquitto/certs/server.key
+          
+          Logs: /var/log/mosquitto/mosquitto.log
+
+          SBBS SSL Certificate:
+          - Certificate File: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert (PEM format)
+          - Private Key File: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key (PEM format)
+          - Uses hostname-based naming for better organization
+          
+          SBBS MQTT Client Certificates (copied to {{ sbbs_dir }}/ctrl/):
+          - CA Certificate: {{ sbbs_dir }}/ctrl/ca.crt
+          - Client Certificate: {{ sbbs_dir }}/ctrl/sbbs_mqtt.crt
+          - Client Key: {{ sbbs_dir }}/ctrl/sbbs_mqtt.key
+
+          For SCFG MQTT Configuration (with Let's Encrypt TLS):
+          Broker_addr: {{ bbs_hostname }}
+          Broker_port: 8883
+          TLS_mode: 1
+          Username: {{ sbbs_user }}
+          Password: {{ mqtt_password | default('sbbsmqtt') }}
+          TLS_cafile: (leave blank - Let's Encrypt CA is trusted)
+          TLS_certfile: (leave blank - server cert authentication only)
+          TLS_keyfile: (leave blank - server cert authentication only)
+
+          For SCFG MQTT Configuration (with self-signed certs):
+          Broker_addr: {{ bbs_hostname }}
+          Broker_port: 8883
+          TLS_mode: 1
+          TLS_cafile: /sbbs/ctrl/ca.crt
+          TLS_certfile: /sbbs/ctrl/sbbs_mqtt.crt
+          TLS_keyfile: /sbbs/ctrl/sbbs_mqtt.key
+
+    - name: Check if mosquitto log file exists
+      stat:
+        path: /var/log/mosquitto/mosquitto.log
+      register: mosquitto_log_exists
+
+    - name: Set mosquitto log file permissions
+      file:
+        path: /var/log/mosquitto/mosquitto.log
+        state: touch
+        owner: "1883"
+        group: "1883"
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+      when: not mosquitto_log_exists.stat.exists
+
+    - name: Configure SBBS LogFacility in sbbs.ini
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^(\s*)LogFacility\s*=\s*.*$'
+        line: '\1LogFacility = 3'
+        backrefs: yes
+      become_user: "{{ sbbs_user }}"
+      ignore_errors: yes
+      notify: restart sbbs
+
+    - name: Setup logrotate for SBBS logs
+      copy:
+        content: |
+          /var/log/sbbs*.log {
+              weekly
+              missingok
+              rotate 52
+              notifempty
+              create 640 {{ sbbs_user }} {{ sbbs_user }}
+              sharedscripts
+              postrotate
+                  /bin/systemctl reload rsyslog > /dev/null 2>&1 || true
+              endscript
+          }
+        dest: /etc/logrotate.d/sbbs
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Setup logrotate for Mosquitto logs
+      copy:
+        content: |
+          /var/log/mosquitto/*.log {
+              weekly
+              missingok
+              rotate 52
+              notifempty
+              create 644 1883 1883
+              compress
+              delaycompress
+              sharedscripts
+              postrotate
+                  /usr/bin/docker exec mosquitto pkill -HUP mosquitto > /dev/null 2>&1 || true
+              endscript
+          }
+        dest: /etc/logrotate.d/mosquitto
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create systemd service file
+      template:
+        src: sbbs.service.j2
+        dest: /etc/systemd/system/sbbs.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Check if Let's Encrypt certificate already exists
+      stat:
+        path: /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem
+      register: letsencrypt_cert
+
+    - name: Stop SBBS temporarily for initial certificate generation
+      systemd:
+        name: sbbs
+        state: stopped
+      when: not letsencrypt_cert.stat.exists
+      ignore_errors: yes
+
+    - name: Obtain Let's Encrypt certificate (standalone mode)
+      command: >
+        certbot certonly
+        --standalone
+        --non-interactive
+        --agree-tos
+        --email chris@edwards.pub
+        --domains {{ bbs_hostname }}
+      when: not letsencrypt_cert.stat.exists
+      register: certbot_result
+
+    - name: Display Let's Encrypt certificate generation result
+      debug:
+        msg: |
+          Let's Encrypt certificate generation completed.
+          Certificate files are located at: /etc/letsencrypt/live/{{ bbs_hostname }}/
+          - fullchain.pem (certificate + intermediate chain)
+          - privkey.pem (private key)
+          - chain.pem (intermediate certificate chain)
+          - cert.pem (certificate only)
+      when: certbot_result is defined and not certbot_result.skipped | default(false)
+
+    # ===============================================
+    # MQTT BROKER SSL CERTIFICATE INSTALLATION
+    # ===============================================
+    - name: Copy Let's Encrypt full certificate chain for MQTT broker
+      copy:
+        src: /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem
+        dest: /opt/mosquitto/certs/mqtt-server-cert.pem
+        owner: "1883"
+        group: "1883"
+        mode: "0644"
+        remote_src: yes
+      notify: restart mosquitto
+
+    - name: Copy Let's Encrypt private key for MQTT broker
+      copy:
+        src: /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem
+        dest: /opt/mosquitto/certs/mqtt-server-key.pem
+        owner: "1883"
+        group: "1883"
+        mode: "0600"
+        remote_src: yes
+      notify: restart mosquitto
+
+    - name: Copy Let's Encrypt CA chain for MQTT broker
+      copy:
+        src: /etc/letsencrypt/live/{{ bbs_hostname }}/chain.pem
+        dest: /opt/mosquitto/certs/mqtt-ca-chain.pem
+        owner: "1883"
+        group: "1883"
+        mode: "0644"
+        remote_src: yes
+      notify: restart mosquitto
+
+    # ===============================================
+    # SYNCHRONET BBS SSL CERTIFICATE INSTALLATION
+    # ===============================================
+    - name: Check if SBBS SSL certificate exists
+      stat:
+        path: "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+      register: sbbs_ssl_cert_exists
+
+    - name: Check SBBS SSL certificate hostname if it exists
+      shell: openssl x509 -in "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert" -text -noout | grep -E "Subject:|DNS:" || true
+      register: sbbs_ssl_cert_check
+      when: sbbs_ssl_cert_exists.stat.exists
+      changed_when: false
+      become_user: "{{ sbbs_user }}"
+
+    - name: Set fact for SBBS SSL certificate regeneration needed
+      set_fact:
+        sbbs_ssl_regen_needed: "{{ not sbbs_ssl_cert_exists.stat.exists or (sbbs_ssl_cert_exists.stat.exists and bbs_hostname not in sbbs_ssl_cert_check.stdout) }}"
+
+    - name: Create hostname-based SSL certificate file for Synchronet BBS certtool
+      shell: |
+        # Create hostname-based certificate file in PEM format
+        # Try separate certificate and key approach
+        cp /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+        cp /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+        chown {{ sbbs_user }}:{{ sbbs_user }} "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert" "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+        chmod 644 "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+        chmod 600 "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+      notify: restart sbbs
+      when: sbbs_ssl_regen_needed
+
+    # ===============================================
+    # DEBUG SSL CERTIFICATE ISSUES
+    # ===============================================
+    - name: Check SSL certificate files exist and permissions
+      stat:
+        path: "{{ item }}"
+      register: ssl_debug_files
+      loop:
+        - "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+        - "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+        - "/etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem"
+        - "/etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem"
+
+    - name: Display SSL certificate debugging information
+      debug:
+        msg: |
+          SSL Certificate Debug Information:
+          =================================
+          
+          SBBS SSL Certificate: {{ 'EXISTS' if ssl_debug_files.results[0].stat.exists else 'MISSING' }}
+          - Path: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert
+          {% if ssl_debug_files.results[0].stat.exists %}
+          - Owner: {{ ssl_debug_files.results[0].stat.uid }}:{{ ssl_debug_files.results[0].stat.gid }}
+          - Mode: {{ ssl_debug_files.results[0].stat.mode }}
+          - Size: {{ ssl_debug_files.results[0].stat.size }} bytes
+          {% endif %}
+          
+          SBBS SSL Private Key: {{ 'EXISTS' if ssl_debug_files.results[1].stat.exists else 'MISSING' }}
+          - Path: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key
+          {% if ssl_debug_files.results[1].stat.exists %}
+          - Owner: {{ ssl_debug_files.results[1].stat.uid }}:{{ ssl_debug_files.results[1].stat.gid }}
+          - Mode: {{ ssl_debug_files.results[1].stat.mode }}
+          - Size: {{ ssl_debug_files.results[1].stat.size }} bytes
+          {% endif %}
+          
+          Let's Encrypt Certificate: {{ 'EXISTS' if ssl_debug_files.results[2].stat.exists else 'MISSING' }}
+          - Path: /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem
+          {% if ssl_debug_files.results[2].stat.exists %}
+          - Size: {{ ssl_debug_files.results[2].stat.size }} bytes
+          {% endif %}
+          
+          Let's Encrypt Private Key: {{ 'EXISTS' if ssl_debug_files.results[3].stat.exists else 'MISSING' }}
+          - Path: /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem
+          {% if ssl_debug_files.results[3].stat.exists %}
+          - Size: {{ ssl_debug_files.results[3].stat.size }} bytes
+          {% endif %}
+
+
+
+    - name: Force copy SSL certificates if they're missing or don't match
+      block:
+        - name: Force create hostname-based SSL certificate files for Synchronet BBS
+          shell: |
+            cp /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+            cp /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+            chown {{ sbbs_user }}:{{ sbbs_user }} "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert" "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+            chmod 644 "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+            chmod 600 "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+          notify: restart sbbs
+
+        - name: Display force copy message
+          debug:
+            msg: |
+              Hostname-based SSL certificate files have been force-created from Let's Encrypt.
+              Certificate file: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert (PEM format)
+              Private key file: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key (PEM format) 
+              Uses hostname-based naming for better organization.
+      when: >
+        not ssl_debug_files.results[0].stat.exists
+
+    - name: Display SSL certificate troubleshooting guide
+      debug:
+        msg: |
+          SSL Certificate Troubleshooting Guide:
+          =====================================
+          
+          Certificate Configuration:
+          - Synchronet BBS uses hostname-based SSL certificate files
+          - Certificate file: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert (PEM format)
+          - Private key file: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key (PEM format)
+          - Uses hostname-based naming for better organization
+          
+          Manual verification commands (run as sbbs user):
+          
+          1. Check certificate file:
+             openssl x509 -in {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert -text -noout
+             
+          2. Verify certificate hostname matches:
+             openssl x509 -in {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert -text -noout | grep -E "Subject:|DNS:"
+             # Should show {{ bbs_hostname }} in the DNS names
+          
+          3. Check certificate validity:
+             openssl x509 -in {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert -noout -dates
+             
+          4. Verify private key:
+             openssl rsa -in {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key -noout -check
+             
+          5. Check certificate and key match:
+             openssl x509 -noout -modulus -in {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert | openssl md5
+             openssl rsa -noout -modulus -in {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key | openssl md5
+             # Both should produce the same hash
+             
+          6. Check file permissions and ownership:
+             ls -la {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.*
+             # Should show: -rw-r--r-- sbbs sbbs .cert and -rw------- sbbs sbbs .key
+          
+          7. Test with Synchronet certtool (different approaches):
+             cd {{ sbbs_dir }}/ctrl
+             # Try importing the certificate file:
+             ../exec/jsexec certtool --import {{ bbs_hostname }}.cert
+             # Or try importing with key file:
+             ../exec/jsexec certtool --import {{ bbs_hostname }}.cert {{ bbs_hostname }}.key
+             
+          8. Create combined certificate file if needed:
+             cat {{ bbs_hostname }}.cert {{ bbs_hostname }}.key > {{ bbs_hostname }}-combined.pem
+             ../exec/jsexec certtool --import {{ bbs_hostname }}-combined.pem
+             
+          9. Convert to PKCS#12 format if needed:
+             openssl pkcs12 -export -out {{ bbs_hostname }}.p12 -inkey {{ bbs_hostname }}.key -in {{ bbs_hostname }}.cert -password pass:
+             ../exec/jsexec certtool --import-pkcs12 {{ bbs_hostname }}.p12
+          
+          CryptLib Error Codes:
+          - Error -32: CRYPT_ERROR_NOTINITED (cryptlib not initialized)
+          - Error -43: CRYPT_ERROR_BADDATA (malformed or corrupted data)
+          
+          Source Let's Encrypt files:
+          - Certificate: /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem
+          - Private key: /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem
+          
+          Note: This configuration uses hostname-based certificate files 
+          ({{ bbs_hostname }}.cert and {{ bbs_hostname }}.key) for better organization.
+
+    # ===============================================
+    # VERIFY SSL CERTIFICATE INSTALLATION
+    # ===============================================
+    - name: Verify MQTT SSL certificates exist
+      stat:
+        path: "{{ item }}"
+      register: mqtt_ssl_files
+      loop:
+        - /opt/mosquitto/certs/mqtt-server-cert.pem
+        - /opt/mosquitto/certs/mqtt-server-key.pem
+        - /opt/mosquitto/certs/mqtt-ca-chain.pem
+
+    - name: Verify Synchronet SSL certificates exist
+      stat:
+        path: "{{ item }}"
+      register: sbbs_ssl_files
+      loop:
+        - "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert"
+        - "{{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key"
+
+    - name: Display SSL certificate installation status
+      debug:
+        msg: |
+          SSL Certificate Installation Summary:
+          =====================================
+          
+          MQTT Broker Certificates:
+          - Server Certificate: {{ 'INSTALLED' if mqtt_ssl_files.results[0].stat.exists else 'MISSING' }} (/opt/mosquitto/certs/mqtt-server-cert.pem)
+          - Server Private Key: {{ 'INSTALLED' if mqtt_ssl_files.results[1].stat.exists else 'MISSING' }} (/opt/mosquitto/certs/mqtt-server-key.pem)
+          - CA Chain: {{ 'INSTALLED' if mqtt_ssl_files.results[2].stat.exists else 'MISSING' }} (/opt/mosquitto/certs/mqtt-ca-chain.pem)
+          
+          Synchronet BBS Certificates:
+          - Certificate File: {{ 'INSTALLED' if sbbs_ssl_files.results[0].stat.exists else 'MISSING' }} ({{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert - PEM format)
+          - Private Key File: {{ 'INSTALLED' if sbbs_ssl_files.results[1].stat.exists else 'MISSING' }} ({{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key - PEM format)
+          
+          Source Let's Encrypt Certificate:
+          - Location: /etc/letsencrypt/live/{{ bbs_hostname }}/
+          - Domain: {{ bbs_hostname }}
+
+    - name: Create certificate renewal script for Synchronet and MQTT
+      copy:
+        content: |
+          #!/bin/bash
+          # Let's Encrypt renewal script for Synchronet BBS built-in webserver and MQTT broker
+          # This script renews certificates and updates both services with clearly named files
+
+          set -euo pipefail
+
+          echo "Starting SSL certificate renewal process for {{ bbs_hostname }}"
+          echo "========================================================"
+
+          # Stop Synchronet to free up ports 80/443
+          echo "Stopping Synchronet service..."
+          systemctl stop sbbs
+
+          # Renew certificate
+          echo "Attempting certificate renewal..."
+          if certbot renew --standalone --quiet; then
+              echo "✓ Certificate renewal successful"
+              
+              # Update Synchronet BBS certificate (Hostname-based PEM files)
+              echo "Updating Synchronet BBS certificate..."
+              cp /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert
+              cp /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key
+              
+              # Set proper ownership and permissions for Synchronet certificate
+              chown {{ sbbs_user }}:{{ sbbs_user }} {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key
+              chmod 644 {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert
+              chmod 600 {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.key
+              echo "✓ Synchronet BBS certificate updated (Hostname-based PEM files)"
+              
+              # Update MQTT broker certificates with clear naming
+              echo "Updating MQTT broker certificates..."
+              cp /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem /opt/mosquitto/certs/mqtt-server-cert.pem
+              cp /etc/letsencrypt/live/{{ bbs_hostname }}/privkey.pem /opt/mosquitto/certs/mqtt-server-key.pem
+              cp /etc/letsencrypt/live/{{ bbs_hostname }}/chain.pem /opt/mosquitto/certs/mqtt-ca-chain.pem
+              
+              # Set proper ownership for MQTT certificates
+              chown 1883:1883 /opt/mosquitto/certs/mqtt-*.pem
+              chmod 644 /opt/mosquitto/certs/mqtt-server-cert.pem
+              chmod 644 /opt/mosquitto/certs/mqtt-ca-chain.pem
+              chmod 600 /opt/mosquitto/certs/mqtt-server-key.pem
+              echo "✓ MQTT broker certificates updated"
+              
+              # Restart MQTT broker to pick up new certificates
+              echo "Restarting MQTT broker..."
+              docker restart mosquitto
+              echo "✓ MQTT broker restarted"
+          else
+              echo "⚠ Certificate renewal failed or not needed"
+          fi
+
+          # Restart Synchronet
+          echo "Starting Synchronet service..."
+          systemctl start sbbs
+          echo "✓ Synchronet service started"
+
+          echo "========================================================"
+          echo "SSL certificate renewal process completed"
+          echo "Certificate locations:"
+          echo "  Synchronet: {{ sbbs_dir }}/ctrl/{{ bbs_hostname }}.cert & {{ bbs_hostname }}.key (Hostname-based PEM files)"
+          echo "  MQTT: /opt/mosquitto/certs/mqtt-server-cert.pem & mqtt-server-key.pem"
+        dest: /usr/local/bin/renew-ssl.sh
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create systemd service for SSL certificate renewal
+      copy:
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates for Synchronet BBS and MQTT broker
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/renew-ssl.sh
+          User=root
+          StandardOutput=journal
+          StandardError=journal
+        dest: /etc/systemd/system/renew-ssl.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Create systemd timer for SSL certificate renewal
+      copy:
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates for Synchronet BBS and MQTT broker
+          Requires=renew-ssl.service
+
+          [Timer]
+          # Run daily at 2:30 AM
+          OnCalendar=*-*-* 02:30:00
+          # Add randomization to avoid all servers hitting Let's Encrypt at once
+          RandomizedDelaySec=1800
+          # Catch up if system was down
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/renew-ssl.timer
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Enable and start SSL renewal timer
+      systemd:
+        name: renew-ssl.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Enable and start Synchronet SBBS service
+      systemd:
+        name: sbbs
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+
+    - name: restart sbbs
+      systemd:
+        name: sbbs
+        state: restarted
+
+    - name: restart mosquitto
+      docker_container:
+        name: mosquitto
+        restart: yes

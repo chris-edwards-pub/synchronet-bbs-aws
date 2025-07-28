@@ -121,6 +121,22 @@ resource "aws_security_group" "sbbs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # fTelnet HTTP port for the web terminal
+  ingress {
+    from_port   = 1123
+    to_port     = 1123
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # fTelnet HTTPS port for secure web terminal
+  ingress {
+    from_port   = 11235
+    to_port     = 11235
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
