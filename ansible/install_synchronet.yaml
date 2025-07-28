@@ -27,7 +27,7 @@
       file:
         path: /tmp/.ansible-${USER}
         state: directory
-        mode: '0755'
+        mode: '0700'
       ignore_errors: yes
 
     - name: Add Group sbbs
@@ -237,6 +237,36 @@
       ignore_errors: yes
       notify: restart sbbs
 
+    - name: Configure SBBS LogLevel to Debugging in sbbs.ini
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^(\s*)LogLevel\s*=\s*.*$'
+        line: '\1LogLevel = Debugging'
+        backrefs: yes
+      become_user: "{{ sbbs_user }}"
+      ignore_errors: yes
+      notify: restart sbbs
+
+
+    - name: Comment out all non-blank lines after [WSS] except Port=11235, stopping at next section header
+      block:
+        - name: Get lines after [WSS] in services.ini
+          shell: |
+            awk '/^\[WSS\]$/ {p=1; next} /^\[/ {p=0} p {print NR}' {{ sbbs_dir }}/ctrl/services.ini
+          register: wss_lines
+          changed_when: false
+          become_user: "{{ sbbs_user }}"
+        - name: Comment out lines after [WSS] except Port=11235
+          lineinfile:
+            path: "{{ sbbs_dir }}/ctrl/services.ini"
+            regexp: '^(?!Port=11235)([^\[]\S.*)'
+            line: ';\1'
+          loop: "{{ wss_lines.stdout_lines }}"
+          when: wss_lines.stdout_lines is defined
+          become_user: "{{ sbbs_user }}"
+          ignore_errors: yes
+          notify: restart sbbs
+
     - name: Setup logrotate for SBBS logs
       copy:
         content: |
@@ -265,75 +295,229 @@
         mode: "0644"
       notify: reload systemd
 
-    - name: Create empty ssl.cert file if not exists
-      file:
-        path: "{{ sbbs_dir }}/ctrl/ssl.cert"
-        state: touch
-        owner: "{{ sbbs_user }}"
-        group: "{{ sbbs_user }}"
-        mode: "0600"
+    - name: Configure Synchronet web server to use port 8080
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^(\s*)Port\s*=\s*80\s*$'
+        line: '\1Port = 8080'
+        backrefs: yes
+        create: yes
       become_user: "{{ sbbs_user }}"
 
-    - name: Configure letsyncrypt.ini - Comment out Directory line
+    - name: Remove Synchronet HTTPS port configuration (Nginx handles SSL)
       lineinfile:
-        path: "{{ sbbs_dir }}/ctrl/letsyncrypt.ini"
-        regexp: '^Directory\s*='
-        line: '; Directory ='
-        backup: yes
-      become_user: "{{ sbbs_user }}"
-
-    - name: Configure letsyncrypt.ini - Agree to Terms of Service
-      lineinfile:
-        path: "{{ sbbs_dir }}/ctrl/letsyncrypt.ini"
-        regexp: '^TOSAgreed\s*='
-        line: 'TOSAgreed = true'
-        backup: yes
-      become_user: "{{ sbbs_user }}"
-
-    - name: Configure letsyncrypt.ini - Add domain configuration
-      lineinfile:
-        path: "{{ sbbs_dir }}/ctrl/letsyncrypt.ini"
-        insertafter: '^\[Domains\]'
-        line: '{{ bbs_hostname }} = {{ sbbs_dir }}/webv4/root'
-        backup: yes
-      become_user: "{{ sbbs_user }}"
-
-    - name: Check if SYNCRYPT event already exists in xtrn.ini
-      lineinfile:
-        path: "{{ sbbs_dir }}/ctrl/xtrn.ini"
-        regexp: '^\[event:SYNCRYPT\]'
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^\s*Port\s*=\s*443\s*$'
         state: absent
-      check_mode: yes
-      register: syncrypt_exists
       become_user: "{{ sbbs_user }}"
 
-    - name: Add SYNCRYPT event to xtrn.ini for automatic SSL certificate management
-      blockinfile:
-        path: "{{ sbbs_dir }}/ctrl/xtrn.ini"
-        marker: ""
-        insertafter: EOF
-        block: |
-          [event:SYNCRYPT]
-                  cmd=?letsyncrypt.js
-                  days=255
-                  time=0
-                  node_num=1
-                  settings=4
-                  startup_dir=
-                  freq=1440
-                  mdays=0
-                  months=0
-                  errlevel=3
-        backup: yes
-        create: no
+    - name: Ensure Synchronet web server is enabled
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^(\s*)AutoStart\s*=\s*.*$'
+        line: '\1AutoStart = true'
+        backrefs: yes
+        create: yes
       become_user: "{{ sbbs_user }}"
-      when: syncrypt_exists.found == 0
 
     - name: Enable and start Synchronet SBBS service
       systemd:
         name: sbbs
         enabled: yes
         state: started
+
+    - name: Flush handlers to restart SBBS with new port configuration
+      meta: flush_handlers
+
+    # Install and configure Nginx with SSL/TLS
+    - name: Check what is using port 80
+      shell: |
+        echo "Checking port 80 usage:"
+        lsof -i :80 || echo "No processes found on port 80"
+        netstat -tlnp | grep :80 || echo "No listeners on port 80"
+      register: port_80_check
+      ignore_errors: yes
+
+    - name: Display port 80 usage
+      debug:
+        msg: "{{ port_80_check.stdout }}"
+
+    - name: Install Nginx and related packages
+      dnf:
+        name:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Remove default Nginx configuration
+      file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+
+    - name: Disable default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      ignore_errors: yes
+
+    - name: Create basic Nginx configuration for initial startup
+      copy:
+        content: |
+          server {
+              listen 80;
+              server_name _;
+              return 200 'Nginx is running';
+              add_header Content-Type text/plain;
+          }
+        dest: /etc/nginx/conf.d/basic.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start and enable Nginx service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Check if SSL certificate already exists
+      stat:
+        path: /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem
+      register: ssl_cert_exists
+
+    - name: Replace basic config with SSL setup config
+      copy:
+        content: |
+          server {
+              listen 80 default_server;
+              server_name {{ bbs_hostname }};
+              
+              location /.well-known/acme-challenge/ {
+                  root /var/www/html;
+              }
+              
+              location / {
+                  return 200 'SSL certificate setup in progress';
+                  add_header Content-Type text/plain;
+              }
+          }
+        dest: /etc/nginx/conf.d/basic.conf
+        owner: root
+        group: root
+        mode: "0644"
+      when: not ssl_cert_exists.stat.exists
+      notify: reload nginx
+
+    - name: Flush handlers to reload Nginx before SSL setup
+      meta: flush_handlers
+
+    - name: Create webroot directory for Let's Encrypt
+      file:
+        path: /var/www/html
+        state: directory
+        mode: "0755"
+
+    - name: Obtain SSL certificate from Let's Encrypt
+      command: >
+        certbot certonly --webroot -w /var/www/html
+        -d {{ bbs_hostname }}
+        --email admin@{{ bbs_hostname }}
+        --agree-tos --non-interactive
+      register: certbot_result
+      when: not ssl_cert_exists.stat.exists
+      ignore_errors: yes
+
+    - name: Display certbot result
+      debug:
+        msg: "{{ certbot_result.stdout if certbot_result.stdout is defined else certbot_result.stderr }}"
+      when: not ssl_cert_exists.stat.exists and certbot_result is defined
+
+    - name: Fail if SSL certificate generation failed
+      fail:
+        msg: "SSL certificate generation failed. Please check DNS configuration for {{ bbs_hostname }}"
+      when: not ssl_cert_exists.stat.exists and certbot_result is defined and certbot_result.rc != 0
+
+    - name: Remove basic Nginx configuration
+      file:
+        path: /etc/nginx/conf.d/basic.conf
+        state: absent
+
+    - name: Deploy final Nginx configuration with SSL
+      template:
+        src: nginx-ssl.conf.j2
+        dest: /etc/nginx/conf.d/{{ bbs_hostname }}.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload nginx
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_config_test
+      changed_when: false
+
+    - name: Display Nginx config test results
+      debug:
+        msg: "{{ nginx_config_test.stderr }}"
+      when: nginx_config_test.rc != 0
+
+    - name: Fail if Nginx configuration is invalid
+      fail:
+        msg: "Nginx configuration test failed"
+      when: nginx_config_test.rc != 0
+
+    - name: Setup automatic SSL certificate renewal with systemd timer
+      copy:
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/certbot renew --quiet
+          ExecStartPost=/usr/bin/systemctl reload nginx
+        dest: /etc/systemd/system/certbot-renew.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create systemd timer for SSL certificate renewal
+      copy:
+        content: |
+          [Unit]
+          Description=Run certbot renewal daily
+          Requires=certbot-renew.service
+
+          [Timer]
+          OnCalendar=daily
+          RandomizedDelaySec=3600
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/certbot-renew.timer
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd daemon for timer
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start certbot renewal timer
+      systemd:
+        name: certbot-renew.timer
+        enabled: yes
+        state: started
+
+    - name: Start Synchronet SBBS service with new configuration
+      systemd:
+        name: sbbs
+        state: started
+        enabled: yes
 
   handlers:
     - name: reload systemd
@@ -354,3 +538,8 @@
       systemd:
         name: sbbs
         state: restarted
+
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
