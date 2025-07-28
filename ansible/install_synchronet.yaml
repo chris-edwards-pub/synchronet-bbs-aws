@@ -247,7 +247,6 @@
       ignore_errors: yes
       notify: restart sbbs
 
-
     - name: Comment out all non-blank lines after [WSS] except Port=11235, stopping at next section header
       block:
         - name: Get lines after [WSS] in services.ini

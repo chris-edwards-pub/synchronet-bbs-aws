@@ -121,6 +121,22 @@ resource "aws_security_group" "sbbs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Commodore 64 40-column port
+  ingress {
+    from_port   = 64
+    to_port     = 64
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Commodore 128 80-column port
+  ingress {
+    from_port   = 128
+    to_port     = 128
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   # fTelnet HTTP port for the web terminal
   ingress {
     from_port   = 1123
