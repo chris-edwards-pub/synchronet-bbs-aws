@@ -41,11 +41,16 @@ resource "aws_eip_association" "sbbs_eip_assoc" {
 }
 
 resource "aws_instance" "sbbs_server" {
+
   ami                    = data.aws_ami.amazon_linux.id
   instance_type         = "t3.micro"
   key_name              = aws_key_pair.sbbs.key_name
   vpc_security_group_ids = [aws_security_group.sbbs.id]
   subnet_id             = aws_subnet.public.id
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
 
   tags = {
     Name = "${var.project_name}-sbbs-server"
@@ -64,6 +69,13 @@ resource "aws_security_group" "sbbs" {
   ingress {
     from_port   = 22
     to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.your_ip]
+  }
+
+  ingress {
+    from_port   = 2222
+    to_port     = 2222
     protocol    = "tcp"
     cidr_blocks = [var.your_ip]
   }

@@ -124,14 +124,6 @@
             owner: "{{ sbbs_user }}"
             group: "{{ sbbs_user }}"
 
-        - name: Clean up previous installation
-          become_user: "{{ sbbs_user }}"
-          shell: |
-            rm -rf ctrl docs exec node? text web webv4 xtrn mods repo
-          args:
-            chdir: "{{ sbbs_dir }}"
-          ignore_errors: yes
-
         - name: Clone Synchronet source repo to repo subdirectory
           become_user: "{{ sbbs_user }}"
           git:
@@ -159,17 +151,17 @@
             SBBSDIR: "{{ sbbs_dir }}"
           notify: restart sbbs
 
+      when: not symlink_check.stat.exists or (sbbs_check is defined and sbbs_check.rc != 0)
+
     - name: Set TelnetInterface for BBS in sbbs.ini
       lineinfile:
         path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
         regexp: '^([ \t]*)TelnetInterface[ \t]*=.*$'
-        line: '\1TelnetInterface = 0.0.0.0,0.0.0.0:64,0.0.0.0:128'
+        line: '\1TelnetInterface = 0.0.0.0, 0.0.0.0:64, 0.0.0.0:128'
         backrefs: yes
       become_user: "{{ sbbs_user }}"
       ignore_errors: yes
       notify: restart sbbs
-
-      when: not symlink_check.stat.exists or (sbbs_check is defined and sbbs_check.rc != 0)
 
     - name: Set capability on actual binary for binding to privileged ports
       command: setcap cap_net_bind_service=+ep "{{ sbbs_binary }}"
@@ -257,24 +249,39 @@
       ignore_errors: yes
       notify: restart sbbs
 
-    - name: Comment out all non-blank lines after [WSS] except Port=11235, stopping at next section header
-      block:
-        - name: Get lines after [WSS] in services.ini
-          shell: |
-            awk '/^\[WSS\]$/ {p=1; next} /^\[/ {p=0} p {print NR}' {{ sbbs_dir }}/ctrl/services.ini
-          register: wss_lines
-          changed_when: false
-          become_user: "{{ sbbs_user }}"
-        - name: Comment out lines after [WSS] except Port=11235
-          lineinfile:
-            path: "{{ sbbs_dir }}/ctrl/services.ini"
-            regexp: '^(?!Port=11235)([^\[]\S.*)'
-            line: ';\1'
-          loop: "{{ wss_lines.stdout_lines }}"
-          when: wss_lines.stdout_lines is defined
-          become_user: "{{ sbbs_user }}"
-          ignore_errors: yes
-          notify: restart sbbs
+    - name: Set Options for [Web] section in sbbs.ini to NO_CGI | NO_HOST_LOOKUP
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
+        regexp: '^\s*Options\s*=.*$'
+        line: 'Options = NO_CGI | NO_HOST_LOOKUP'
+        backrefs: yes
+        insertafter: '^\[Web\]'
+      become_user: "{{ sbbs_user }}"
+      notify: restart sbbs
+
+    - name: Ensure create_self_signed_cert is set to false in main.ini
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/main.ini"
+        regexp: '^\s*create_self_signed_cert\s*=.*$'
+        line: 'create_self_signed_cert=false'
+        backrefs: yes
+        create: yes
+      become_user: "{{ sbbs_user }}"
+
+    - name: Comment out all non-blank, uncommented lines after [WSS] except Port=11235, stopping at next section header
+      shell: |
+        awk '
+        BEGIN {in_section=0}
+        /^\[WSS\]$/ {in_section=1; print; next}
+        /^\[/ {if(in_section){in_section=0}; print; next}
+        in_section && $0 !~ /^\s*$/ && $0 !~ /^Port=11235$/ && $0 !~ /^;/ {
+          print ";" $0
+          next
+        }
+        {print}
+        ' {{ sbbs_dir }}/ctrl/services.ini > {{ sbbs_dir }}/ctrl/services.ini.tmp && mv {{ sbbs_dir }}/ctrl/services.ini.tmp {{ sbbs_dir }}/ctrl/services.ini
+      become_user: "{{ sbbs_user }}"
+      notify: restart sbbs
 
     - name: Setup logrotate for SBBS logs
       copy:
