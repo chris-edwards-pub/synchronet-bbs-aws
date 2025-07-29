@@ -336,14 +336,51 @@
         create: yes
       become_user: "{{ sbbs_user }}"
 
+    - name: Ensure SBBS ipfilter_exempt.cfg exists
+      file:
+        path: "{{ sbbs_dir }}/ctrl/ipfilter_exempt.cfg"
+        state: touch
+        owner: "{{ sbbs_user }}"
+        group: "{{ sbbs_user }}"
+        mode: "0644"
+      become_user: "{{ sbbs_user }}"
+
+    - name: Get IMDSv2 token from EC2 metadata service (on instance)
+      shell: |
+        curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60"
+      register: imds_token
+      changed_when: false
+
+    - name: Get EC2 public IP from metadata (IMDSv2, on instance)
+      shell: |
+        curl -s -H "X-aws-ec2-metadata-token: {{ imds_token.stdout }}" http://169.254.169.254/latest/meta-data/public-ipv4 || true
+      register: ec2_public_ip
+      changed_when: false
+
+    - name: Get EC2 private IP from metadata (IMDSv2, on instance)
+      shell: |
+        curl -s -H "X-aws-ec2-metadata-token: {{ imds_token.stdout }}" http://169.254.169.254/latest/meta-data/local-ipv4 || true
+      register: ec2_private_ip
+      changed_when: false
+
+    - name: Exempt EC2 public and private IPs from SBBS IP filter
+      lineinfile:
+        path: "{{ sbbs_dir }}/ctrl/ipfilter_exempt.cfg"
+        line: "{{ item }}"
+        create: yes
+        state: present
+      loop:
+        - "{{ ec2_public_ip.stdout }}"
+        - "{{ ec2_private_ip.stdout }}"
+      become_user: "{{ sbbs_user }}"
+      when:
+        - ec2_public_ip.stdout | length > 0 or ec2_private_ip.stdout | length > 0
+
     - name: Enable and start Synchronet SBBS service
       systemd:
         name: sbbs
         enabled: yes
         state: started
-
-    - name: Flush handlers to restart SBBS with new port configuration
-      meta: flush_handlers
 
     # Install and configure Nginx with SSL/TLS
     - name: Check what is using port 80
