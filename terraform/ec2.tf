@@ -25,10 +25,14 @@ resource "aws_key_pair" "sbbs" {
 # Elastic IP for consistent public IP address
 resource "aws_eip" "sbbs_eip" {
   domain = "vpc"
-  
+
   tags = {
     Name        = "${var.project_name}-sbbs-eip"
     Environment = var.environment
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 
   depends_on = [aws_internet_gateway.main]
