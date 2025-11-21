@@ -315,7 +315,6 @@
       lineinfile:
         path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
         regexp: '^(\s*)Port\s*=\s*80\s*$'
-        line: '\1Port = 8080'
         backrefs: yes
         create: yes
       become_user: "{{ sbbs_user }}"
