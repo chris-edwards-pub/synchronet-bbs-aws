@@ -6,13 +6,26 @@
     <title>C64.pub BBS Terminal</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
     <style>
+        @font-face {
+            font-family: 'PxPlusIBM_VGA8';
+            src: url('https://cdn.jsdelivr.net/gh/spaceface777/web-font-collection@master/IBM/PxPlus_IBM_VGA8.ttf') format('truetype');
+        }
+        .xterm {
+            font-family: 'PxPlusIBM_VGA8', monospace;
+            -webkit-font-smoothing: none;
+            font-smooth: never;
+            -moz-osx-font-smoothing: unset;
+        }
+        .xterm-viewport {
+            -webkit-font-smoothing: none;
+            font-smooth: never;
+        }
         body {
             margin: 0;
             padding: 20px;
             background-color: #000;
             font-family: 'Courier New', monospace;
             color: #00ff00;
-            overflow-x: hidden;
         }
         .container {
             max-width: 1200px;
@@ -33,7 +46,6 @@
             padding: 10px;
             margin: 20px;
             background: #000000;
-            margin-right: 40px;
         }
         .terminal-container {
             margin: 20px auto;
@@ -82,8 +94,11 @@
             cursorBlink: true,
             cursorStyle: 'block',
             fontSize: 16,
-            fontFamily: 'Consolas, "Courier New", monospace',
+            fontFamily: 'PxPlusIBM_VGA8, monospace',
             letterSpacing: 0,
+            lineHeight: 1.0,
+            rendererType: 'canvas',
+            customGlyphs: true,
             theme: {
                 background: '#000000',
                 foreground: '#00ff00',
@@ -124,16 +139,6 @@
 
         // Open terminal with fixed 80x25 dimensions
         term.open(document.getElementById('terminal'));
-        
-        // Adjust terminal width to account for scrollbar
-        const terminalElement = document.getElementById('terminal');
-        const computedStyle = window.getComputedStyle(terminalElement);
-        const availableWidth = terminalElement.clientWidth - parseInt(computedStyle.paddingLeft) - parseInt(computedStyle.paddingRight);
-        
-        // Ensure xterm doesn't extend beyond available space
-        if (term._core && term._core._renderService) {
-            term._core._renderService._renderer.dimensions.canvasWidth = Math.min(term._core._renderService._renderer.dimensions.canvasWidth, availableWidth);
-        }
 
         // WebSocket connection
         let ws = null;
