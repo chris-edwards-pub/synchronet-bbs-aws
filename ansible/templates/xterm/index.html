@@ -6,20 +6,33 @@
     <title>C64.pub BBS Terminal</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
     <style>
+        /* Host PxPlus_IBM_VGA8.woff2 at /fonts or adjust this URL */
         @font-face {
             font-family: 'PxPlusIBM_VGA8';
-            src: url('https://cdn.jsdelivr.net/gh/spaceface777/web-font-collection@master/IBM/PxPlus_IBM_VGA8.ttf') format('truetype');
+            src: url('/fonts/PxPlus_IBM_VGA8.woff2') format('woff2');
         }
+
         .xterm {
             font-family: 'PxPlusIBM_VGA8', monospace;
             -webkit-font-smoothing: none;
             font-smooth: never;
             -moz-osx-font-smoothing: unset;
+            letter-spacing: 0 !important;
+            word-spacing: 0 !important;
         }
+
         .xterm-viewport {
             -webkit-font-smoothing: none;
             font-smooth: never;
         }
+
+        .xterm-screen canvas {
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+            /* no transform here – avoids hairline seams */
+        }
+
         body {
             margin: 0;
             padding: 20px;
@@ -71,6 +84,10 @@
             background-color: #444400;
             color: #ffff44;
         }
+        .ready {
+            background-color: #002244;
+            color: #88ccff;
+        }
     </style>
 </head>
 <body>
@@ -93,12 +110,16 @@
         const term = new Terminal({
             cursorBlink: true,
             cursorStyle: 'block',
+
             fontSize: 16,
             fontFamily: 'PxPlusIBM_VGA8, monospace',
             letterSpacing: 0,
             lineHeight: 1.0,
-            rendererType: 'canvas',
-            customGlyphs: true,
+
+            rendererType: 'canvas',   // canvas renderer for crisp bitmap fonts
+            customGlyphs: true,       // lets xterm draw solid block glyphs
+
+            drawBoldTextInBrightColors: false,
             theme: {
                 background: '#000000',
                 foreground: '#00ff00',
@@ -125,13 +146,11 @@
             rows: 25,
             convertEol: true,
             scrollback: 1000,
-            // Set terminal type for Synchronet BBS compatibility
+            // Set terminal type for Synchronet BBS compatibility (ignored by xterm but harmless)
             terminalType: 'ansi',
             allowTransparency: false,
             bellStyle: 'sound'
         });
-
-        // Fixed 80x25 terminal - no fit addon needed
 
         // Add web links addon
         const webLinksAddon = new WebLinksAddon.WebLinksAddon();
@@ -155,8 +174,6 @@
             // Use WSS for secure connection via nginx proxy
             ws = new WebSocket('wss://xterm.c64.pub/ws/');
 
-            // Add keepalive functionality
-
             ws.onopen = function() {
                 updateStatus('connected', 'Connected to BBS');
                 term.clear();
@@ -164,22 +181,17 @@
                 console.log('WebSocket readyState:', ws.readyState);
                 console.log('WebSocket protocol:', ws.protocol);
                 console.log('WebSocket extensions:', ws.extensions);
-                
-                // Let the BBS handle all display - don't send any local messages
             };
             
             ws.onmessage = function(event) {
                 console.log('Received data, type:', typeof event.data, 'length:', event.data.length || event.data.byteLength);
                 if (typeof event.data === 'string') {
-                    // Pass through all BBS data without filtering
                     term.write(event.data);
                 } else if (event.data instanceof ArrayBuffer) {
-                    // Handle binary data from BBS
                     const uint8Array = new Uint8Array(event.data);
                     const string = new TextDecoder('utf-8', {ignoreBOM: true, fatal: false}).decode(uint8Array);
                     term.write(string);
                 } else if (event.data instanceof Blob) {
-                    // Handle blob data
                     event.data.arrayBuffer().then(buffer => {
                         const uint8Array = new Uint8Array(buffer);
                         const string = new TextDecoder('utf-8', {ignoreBOM: true, fatal: false}).decode(uint8Array);
@@ -217,8 +229,6 @@
                 ws.send(data);
             }
         });
-
-        // Terminal is fixed size - no need for resize handling
 
         // Handle F5 for reconnect
         document.addEventListener('keydown', function(event) {
