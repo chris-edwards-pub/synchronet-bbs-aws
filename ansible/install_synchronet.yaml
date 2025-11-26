@@ -496,7 +496,7 @@
       tags: ["websocket", "xterm"]
       template:
         src: xterm/index.html
-        dest: /var/www/html/xterm/index.html
+        dest: /var/www/xterm/index.html
         owner: root
         group: root
         mode: "0644"

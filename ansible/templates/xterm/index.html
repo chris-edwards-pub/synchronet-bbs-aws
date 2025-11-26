@@ -12,6 +12,7 @@
             background-color: #000;
             font-family: 'Courier New', monospace;
             color: #00ff00;
+            overflow-x: hidden;
         }
         .container {
             max-width: 1200px;
@@ -32,6 +33,7 @@
             padding: 10px;
             margin: 20px;
             background: #000000;
+            margin-right: 40px;
         }
         .terminal-container {
             margin: 20px auto;
@@ -122,6 +124,16 @@
 
         // Open terminal with fixed 80x25 dimensions
         term.open(document.getElementById('terminal'));
+        
+        // Adjust terminal width to account for scrollbar
+        const terminalElement = document.getElementById('terminal');
+        const computedStyle = window.getComputedStyle(terminalElement);
+        const availableWidth = terminalElement.clientWidth - parseInt(computedStyle.paddingLeft) - parseInt(computedStyle.paddingRight);
+        
+        // Ensure xterm doesn't extend beyond available space
+        if (term._core && term._core._renderService) {
+            term._core._renderService._renderer.dimensions.canvasWidth = Math.min(term._core._renderService._renderer.dimensions.canvasWidth, availableWidth);
+        }
 
         // WebSocket connection
         let ws = null;
