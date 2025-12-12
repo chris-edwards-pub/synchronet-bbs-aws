@@ -15,10 +15,16 @@ jobs:
         with:
           terraform_version: 1.14.2
 
+      - name: Show terraform version
+        run: terraform version
+
       - name: Install ansible
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible    
+
+      - name: Show ansible version
+        run: ansible --version
 
       - name: Show pwd path
         run: pwd
