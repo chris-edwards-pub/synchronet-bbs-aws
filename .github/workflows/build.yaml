@@ -18,9 +18,6 @@ jobs:
       - name: Show terraform version
         run: terraform version   
 
-      - name: Show ansible version
-        run: ansible --version
-
       - name: Show pwd path
         run: pwd
       
