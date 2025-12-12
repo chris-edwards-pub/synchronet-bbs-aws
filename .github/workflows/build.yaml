@@ -6,9 +6,14 @@ jobs:
   build-all:
     runs-on: ubuntu-latest
     steps:
-      - name: Show pwd path
-        run: pwd
-      - name: Show tree structure
-        run: tree -L 4
       - name: Get repository code
         uses: actions/checkout@v3
+      
+      # - name: Install tree
+      #   run: sudo apt-get update && sudo apt-get install -y tree
+      
+      - name: Show pwd path
+        run: pwd
+      
+      - name: Show tree structure
+        run: tree -L 4
