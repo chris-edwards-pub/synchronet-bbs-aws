@@ -6,7 +6,9 @@ jobs:
   build-all:
     runs-on: ubuntu-latest
     steps:
-      - name: Show Path
+      - name: Show pwd path
         run: pwd
+      - name: Show tree structure
+        run: tree -a -L 2
       - name: Get repository code
         uses: actions/checkout@v3
