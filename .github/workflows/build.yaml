@@ -9,6 +9,6 @@ jobs:
       - name: Show pwd path
         run: pwd
       - name: Show tree structure
-        run: tree -a -L 2
+        run: tree -a -L 4
       - name: Get repository code
         uses: actions/checkout@v3
