@@ -3,10 +3,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  hello:
+  buuid-all:
     runs-on: ubuntu-latest
     steps:
       - name: Show Path
-        run: echo "$PATH"
+        run: pwd
       - name: Get repository code
         uses: actions/checkout@v3
