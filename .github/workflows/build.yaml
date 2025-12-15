@@ -1,7 +1,5 @@
 name: Build
-on:
-  workflow_dispatch:
-  push:
+on: [workflow_dispatch, push]
 
 jobs:
   build-all:
