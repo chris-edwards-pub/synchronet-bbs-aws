@@ -492,6 +492,22 @@
         state: directory
         mode: "0755"
 
+    - name: Create xterm fonts directory
+      tags: ["websocket", "xterm"]
+      file:
+        path: /var/www/xterm/fonts
+        state: directory
+        mode: "0755"
+
+    - name: Copy xterm fonts
+      tags: ["websocket", "xterm"]
+      copy:
+        src: templates/xterm/fonts/
+        dest: /var/www/xterm/fonts/
+        owner: root
+        group: root
+        mode: "0644"
+
     - name: Create xterm index.html
       tags: ["websocket", "xterm"]
       template:

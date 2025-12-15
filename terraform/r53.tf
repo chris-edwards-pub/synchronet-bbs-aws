@@ -27,6 +27,15 @@ resource "aws_route53_record" "sbbs" {
   records = ["c64.pub."]
 }
 
+# CNAME for www.c64.pub pointing to c64.pub
+resource "aws_route53_record" "www" {
+  zone_id = aws_route53_zone.c64_pub.zone_id
+  name    = "www.c64.pub"
+  type    = "CNAME"
+  ttl     = 600
+  records = ["c64.pub."]
+}
+
 # CNAME for xterm.c64.pub pointing to c64.pub
 resource "aws_route53_record" "xterm" {
   zone_id = aws_route53_zone.c64_pub.zone_id
