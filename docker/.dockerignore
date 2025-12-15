@@ -1,0 +1,8 @@
+.git
+.gitlab-ci.yml
+*.pyc
+__pycache__
+.terraform
+ansible
+node_modules
+docker/data/sbbs

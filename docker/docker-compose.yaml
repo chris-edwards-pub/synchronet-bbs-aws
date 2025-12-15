@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  sbbs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SBBS_BRANCH: master
+    container_name: synchronet-sbbs
+    restart: unless-stopped
+    ports:
+      - "2323:23"
+      - "64:64"
+      - "128:128"
+      - "80:8080"
+      - "1123:1123"
+      - "11235:11235"
+      - "1883:1883"
+    volumes:
+      - "./data/sbbs:/home/sbbs/sbbs:rw"
+    environment:
+      - BBS_HOSTNAME=localhost
+    tty: true
+    stdin_open: true
