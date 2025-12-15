@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C64.pub BBS Terminal</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <style>
+        @font-face {
+            font-family: 'PerfectDOSVGA437';
+            src: url('fonts/PerfectDOSVGA437.ttf') format('truetype');
+            font-display: block;
+        }
+
+        .xterm {
+            font-family: 'PerfectDOSVGA437', monospace;
+            -webkit-font-smoothing: none;
+            font-smooth: never;
+            -moz-osx-font-smoothing: unset;
+            letter-spacing: -0.1px !important;
+            word-spacing: 0 !important;
+        }
+
+        .xterm-viewport {
+            -webkit-font-smoothing: none;
+            font-smooth: never;
+        }
+
+        .xterm-screen canvas {
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+            /* no transform here – avoids hairline seams */
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #000;
+            font-family: 'Courier New', monospace;
+            color: #00ff00;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #00ff00;
+            margin-bottom: 20px;
+            text-shadow: 0 0 10px #00ff00;
+        }
+        #terminal {
+            width: auto;
+            height: auto;
+            display: inline-block;
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+            box-shadow: 0 0 20px #00ff00;
+            padding: 10px;
+            margin: 20px;
+            background: #000000;
+        }
+        .terminal-container {
+            margin: 20px auto;
+        }
+        .info {
+            margin: 20px 0;
+            color: #888;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .connected {
+            background-color: #004400;
+            color: #00ff00;
+        }
+        .disconnected {
+            background-color: #440000;
+            color: #ff4444;
+        }
+        .connecting {
+            background-color: #444400;
+            color: #ffff44;
+        }
+        .ready {
+            background-color: #002244;
+            color: #88ccff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>C64.pub BBS Terminal</h1>
+        <div id="status" class="status disconnected">Disconnected</div>
+        <div class="terminal-container">
+            <div id="terminal"></div>
+        </div>
+        <div class="info">
+            <p>Connecting to: xterm.c64.pub:23 (Telnet)</p>
+            <p>Press Ctrl+C to disconnect • F5 to reconnect</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+    <script>
+        // Initialize xterm.js with ANSI terminal specification - 80x25 fixed size
+        const term = new Terminal({
+            cursorBlink: true,
+            cursorStyle: 'block',
+
+            fontSize: 16,
+            fontFamily: '"Codepage 437 English", Codepage437, monospace',
+            letterSpacing: 0,
+            lineHeight: 1.0,
+
+            rendererType: 'canvas',   // canvas renderer for crisp bitmap fonts
+            customGlyphs: true,       // lets xterm draw solid block glyphs
+
+            drawBoldTextInBrightColors: false,
+            theme: {
+                background: '#000000',
+                foreground: '#00ff00',
+                cursor: '#00ff00',
+                selection: '#ffffff33',
+                black: '#000000',
+                red: '#ff0000',
+                green: '#00ff00',
+                yellow: '#ffff00',
+                blue: '#0000ff',
+                magenta: '#ff00ff',
+                cyan: '#00ffff',
+                white: '#ffffff',
+                brightBlack: '#808080',
+                brightRed: '#ff8080',
+                brightGreen: '#80ff80',
+                brightYellow: '#ffff80',
+                brightBlue: '#8080ff',
+                brightMagenta: '#ff80ff',
+                brightCyan: '#80ffff',
+                brightWhite: '#ffffff'
+            },
+            cols: 80,
+            rows: 25,
+            convertEol: true,
+            scrollback: 1000,
+            // Set terminal type for Synchronet BBS compatibility (ignored by xterm but harmless)
+            terminalType: 'ansi',
+            allowTransparency: false,
+            bellStyle: 'sound'
+        });
+
+        // Add web links addon
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        term.loadAddon(webLinksAddon);
+
+        // Open terminal with fixed 80x25 dimensions
+        term.open(document.getElementById('terminal'));
+
+        // WebSocket connection
+        let ws = null;
+        const statusEl = document.getElementById('status');
+
+        function updateStatus(status, message) {
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = message;
+        }
+
+        function connect() {
+            updateStatus('connecting', 'Connecting to BBS...');
+
+            // Use WSS for secure connection via nginx proxy
+            ws = new WebSocket('wss://xterm.c64.pub/ws/');
+
+            ws.onopen = function() {
+                updateStatus('connected', 'Connected to BBS');
+                term.clear();
+                console.log('WebSocket connection opened successfully');
+                console.log('WebSocket readyState:', ws.readyState);
+                console.log('WebSocket protocol:', ws.protocol);
+                console.log('WebSocket extensions:', ws.extensions);
+            };
+            
+            ws.onmessage = function(event) {
+                console.log('Received data, type:', typeof event.data, 'length:', event.data.length || event.data.byteLength);
+                if (typeof event.data === 'string') {
+                    term.write(event.data);
+                } else if (event.data instanceof ArrayBuffer) {
+                    const uint8Array = new Uint8Array(event.data);
+                    const string = new TextDecoder('utf-8', {ignoreBOM: true, fatal: false}).decode(uint8Array);
+                    term.write(string);
+                } else if (event.data instanceof Blob) {
+                    event.data.arrayBuffer().then(buffer => {
+                        const uint8Array = new Uint8Array(buffer);
+                        const string = new TextDecoder('utf-8', {ignoreBOM: true, fatal: false}).decode(uint8Array);
+                        term.write(string);
+                    });
+                }
+            };
+
+            ws.onclose = function(event) {
+                updateStatus('disconnected', 'Disconnected from BBS (Code: ' + event.code + ')');
+                console.log('WebSocket closed with code:', event.code, 'reason:', event.reason);
+                console.log('Was clean closure:', event.wasClean);
+                console.log('Full close event:', event);
+                term.write('\r\n\x1b[31mConnection closed (code: ' + event.code + ')\x1b[0m\r\n');
+            };
+
+            ws.onerror = function(error) {
+                updateStatus('disconnected', 'Connection error');
+                term.write('\r\n\x1b[31mConnection error\x1b[0m\r\n');
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        // Handle terminal input
+        let waitingForConnect = true;
+
+        term.onData(function(data) {
+            if (waitingForConnect) {
+                // Check if user pressed Enter to connect (handle both \r and \n)
+                if (data === '\r' || data === '\n' || data.charCodeAt(0) === 13) {
+                    waitingForConnect = false;
+                    connect();
+                }
+            } else if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(data);
+            }
+        });
+
+        // Handle F5 for reconnect
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'F5') {
+                event.preventDefault();
+                if (!waitingForConnect) {
+                    if (ws) ws.close();
+                    waitingForConnect = true;
+                    showConnectPrompt();
+                }
+            }
+        });
+
+        // Show initial connect prompt
+        function showConnectPrompt() {
+            term.clear();
+            term.write('\r\n\x1b[36m╔══════════════════════════════════════════════════════════════════════════════╗\x1b[0m\r\n');
+            term.write('\x1b[36m║\x1b[0m                         \x1b[32mC64.pub BBS Terminal\x1b[0m                            \x1b[36m║\x1b[0m\r\n');
+            term.write('\x1b[36m║\x1b[0m                                                                              \x1b[36m║\x1b[0m\r\n');
+            term.write('\x1b[36m║\x1b[0m                    \x1b[33mPress ENTER to connect to the BBS\x1b[0m                     \x1b[36m║\x1b[0m\r\n');
+            term.write('\x1b[36m║\x1b[0m                         \x1b[37mTerminal: ansi\x1b[0m                                \x1b[36m║\x1b[0m\r\n');
+            term.write('\x1b[36m╚══════════════════════════════════════════════════════════════════════════════╝\x1b[0m\r\n\r\n');
+            updateStatus('ready', 'Ready to connect - Press ENTER');
+        }
+
+        // Show connect prompt instead of auto-connecting
+        showConnectPrompt();
+    </script>
+</body>
+</html>

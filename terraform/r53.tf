@@ -8,13 +8,41 @@ resource "aws_route53_zone" "c64_pub" {
   }
 }
 
-# A record for bbs.c64.pub pointing to Elastic IP
-resource "aws_route53_record" "sbbs" {
+
+# A record for c64.pub pointing to Elastic IP
+resource "aws_route53_record" "c64_pub" {
   zone_id = aws_route53_zone.c64_pub.zone_id
-  name    = "bbs.c64.pub"
+  name    = "c64.pub"
   type    = "A"
   ttl     = 600
   records = [aws_eip.sbbs_eip.public_ip]
+}
+
+# CNAME for bbs.c64.pub pointing to c64.pub
+resource "aws_route53_record" "sbbs" {
+  zone_id = aws_route53_zone.c64_pub.zone_id
+  name    = "bbs.c64.pub"
+  type    = "CNAME"
+  ttl     = 600
+  records = ["c64.pub."]
+}
+
+# CNAME for www.c64.pub pointing to c64.pub
+resource "aws_route53_record" "www" {
+  zone_id = aws_route53_zone.c64_pub.zone_id
+  name    = "www.c64.pub"
+  type    = "CNAME"
+  ttl     = 600
+  records = ["c64.pub."]
+}
+
+# CNAME for xterm.c64.pub pointing to c64.pub
+resource "aws_route53_record" "xterm" {
+  zone_id = aws_route53_zone.c64_pub.zone_id
+  name    = "xterm.c64.pub"
+  type    = "CNAME"
+  ttl     = 600
+  records = ["c64.pub."]
 }
 
 # Output the name servers for the hosted zone

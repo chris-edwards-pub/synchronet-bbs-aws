@@ -13,6 +13,27 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
+# Ubuntu x86_64 AMI (Canonical)
+data "aws_ami" "ubuntu_x86" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-*-amd64*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+}
+
 resource "aws_key_pair" "sbbs" {
   key_name   = "sbbs"
   public_key = file("~/.ssh/id_ed25519.pub")
@@ -60,6 +81,50 @@ resource "aws_instance" "sbbs_server" {
     Name = "${var.project_name}-sbbs-server"
     Environment = var.environment
     Backup = "true"
+  }
+
+  # Force recreation when key changes
+  user_data = base64encode("echo 'Key: ${aws_key_pair.sbbs.key_name}'")
+}
+
+# Elastic IP for wildcat server
+resource "aws_eip" "wildcat_eip" {
+  domain = "vpc"
+
+  tags = {
+    Name        = "${var.project_name}-wildcat-eip"
+    Environment = var.environment
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Associate Elastic IP with the wildcat instance
+resource "aws_eip_association" "wildcat_eip_assoc" {
+  instance_id   = aws_instance.wildcat_server.id
+  allocation_id = aws_eip.wildcat_eip.id
+}
+
+resource "aws_instance" "wildcat_server" {
+
+  ami                    = data.aws_ami.ubuntu_x86.id
+  instance_type          = "t3.micro"
+  key_name               = aws_key_pair.sbbs.key_name
+  vpc_security_group_ids = [aws_security_group.sbbs.id]
+  subnet_id              = aws_subnet.public.id
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
+  tags = {
+    Name        = "${var.project_name}-wildcat-server"
+    Environment = var.environment
+    Backup      = "true"
   }
 
   # Force recreation when key changes

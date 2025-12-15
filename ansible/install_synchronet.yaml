@@ -19,7 +19,8 @@
     sbbs_dir: "{{ sbbs_home }}/sbbs"
     repo_dir: "{{ sbbs_dir }}/repo"
     sbbs_symlink: "{{ sbbs_dir }}/exec/sbbs"
-    bbs_hostname: bbs.c64.pub
+    hostname: c64.pub
+    bbs_hostname: "bbs.{{ hostname }}"
     time_zone: America/Chicago
 
   tasks:
@@ -27,7 +28,7 @@
       file:
         path: /tmp/.ansible-${USER}
         state: directory
-        mode: '0700'
+        mode: "0700"
       ignore_errors: yes
 
     - name: Add Group sbbs
@@ -253,7 +254,7 @@
       lineinfile:
         path: "{{ sbbs_dir }}/ctrl/sbbs.ini"
         regexp: '^\s*Options\s*=.*$'
-        line: 'Options = NO_CGI | NO_HOST_LOOKUP'
+        line: "Options = NO_CGI | NO_HOST_LOOKUP"
         backrefs: yes
         insertafter: '^\[Web\]'
       become_user: "{{ sbbs_user }}"
@@ -263,7 +264,7 @@
       lineinfile:
         path: "{{ sbbs_dir }}/ctrl/main.ini"
         regexp: '^\s*create_self_signed_cert\s*=.*$'
-        line: 'create_self_signed_cert=false'
+        line: "create_self_signed_cert=false"
         backrefs: yes
         create: yes
       become_user: "{{ sbbs_user }}"
@@ -439,6 +440,20 @@
         path: /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem
       register: ssl_cert_exists
 
+    - name: Check if current certificate includes all required domains
+      shell: |
+        openssl x509 -in /etc/letsencrypt/live/{{ bbs_hostname }}/fullchain.pem -text -noout | \
+        grep -E "DNS:({{ bbs_hostname }}|{{ hostname }}|www\.{{ hostname }}|xterm\.{{ hostname }})" | \
+        wc -l
+      register: cert_domain_count
+      ignore_errors: yes
+      when: ssl_cert_exists.stat.exists
+      changed_when: false
+
+    - name: Set fact for certificate renewal needed
+      set_fact:
+        cert_renewal_needed: "{{ not ssl_cert_exists.stat.exists or (ssl_cert_exists.stat.exists and cert_domain_count.stdout|int < 4) }}"
+
     - name: Replace basic config with SSL setup config
       copy:
         content: |
@@ -471,25 +486,220 @@
         state: directory
         mode: "0755"
 
+    - name: Create xterm webroot directory
+      file:
+        path: /var/www/xterm
+        state: directory
+        mode: "0755"
+
+    - name: Create xterm fonts directory
+      tags: ["websocket", "xterm"]
+      file:
+        path: /var/www/xterm/fonts
+        state: directory
+        mode: "0755"
+
+    - name: Copy xterm fonts
+      tags: ["websocket", "xterm"]
+      copy:
+        src: templates/xterm/fonts/
+        dest: /var/www/xterm/fonts/
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create xterm index.html
+      tags: ["websocket", "xterm"]
+      template:
+        src: xterm/index.html
+        dest: /var/www/xterm/index.html
+        owner: root
+        group: root
+        mode: "0644"
+
+    # WebSocket-to-telnet bridge setup - Using Node.js bridge
+    - name: Install Node.js for WebSocket bridge
+      dnf:
+        name:
+          - nodejs
+          - npm
+        state: present
+
+    - name: Create WebSocket bridge directory
+      file:
+        path: /opt/websocket-bridge
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: "0755"
+
+    - name: Create package.json for WebSocket bridge
+      copy:
+        content: |
+          {
+            "name": "telnet-websocket-bridge",
+            "version": "1.0.0",
+            "description": "WebSocket to Telnet bridge for BBS",
+            "main": "bridge.js",
+            "dependencies": {
+              "ws": "^8.14.2"
+            }
+          }
+        dest: /opt/websocket-bridge/package.json
+        owner: ec2-user
+        group: ec2-user
+        mode: "0644"
+
+    - name: Create WebSocket to Telnet bridge script
+      copy:
+        content: |
+          const WebSocket = require('ws');
+          const net = require('net');
+
+          console.log('Starting WebSocket to Telnet bridge...');
+
+          const wss = new WebSocket.Server({ 
+            port: 11236,
+            perMessageDeflate: false
+          });
+
+          wss.on('connection', function connection(ws, req) {
+            console.log('New WebSocket connection from:', req.socket.remoteAddress);
+            console.log('Connection headers:', req.headers);
+            
+            // Create telnet connection
+            const telnet = new net.Socket();
+            telnet.setKeepAlive(true, 30000); // Keep TCP connection alive
+            
+            let connected = false;
+            
+            // Connect to telnet server
+            telnet.connect(23, '127.0.0.1', function() {
+              console.log('Connected to telnet server');
+              connected = true;
+            });
+            
+
+            
+            // Forward data from WebSocket to telnet (only if connected)
+            ws.on('message', function incoming(data) {
+              console.log('WS->Telnet:', data.length + ' bytes');
+              if (connected && telnet.writable) {
+                telnet.write(data);
+              } else {
+                console.log('Telnet not ready, dropping message');
+              }
+            });
+            
+            // Forward data from telnet to WebSocket
+            telnet.on('data', function(data) {
+              console.log('Telnet->WS:', data.length + ' bytes');
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(data);
+              }
+            });
+            
+            // Handle disconnections
+            ws.on('close', function(code, reason) {
+              console.log('WebSocket closed with code:', code, 'reason:', reason);
+              connected = false;
+              telnet.destroy();
+            });
+            
+            telnet.on('close', function() {
+              console.log('Telnet connection closed');
+              connected = false;
+              if (ws.readyState === WebSocket.OPEN) {
+                console.log('Closing WebSocket due to telnet close');
+                ws.close();
+              }
+            });
+            
+            telnet.on('error', function(err) {
+              console.error('Telnet error:', err);
+              connected = false;
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.close();
+              }
+            });
+            
+            ws.on('error', function(err) {
+              console.error('WebSocket error:', err);
+              connected = false;
+              telnet.destroy();
+            });
+          });
+
+          console.log('WebSocket bridge listening on port 11236');
+        dest: /opt/websocket-bridge/bridge.js
+        owner: ec2-user
+        group: ec2-user
+        mode: "0644"
+
+    - name: Install npm dependencies for WebSocket bridge
+      npm:
+        path: /opt/websocket-bridge
+        state: present
+      become_user: ec2-user
+
+    - name: Create websockify service for BBS telnet bridge
+      copy:
+        content: |
+          [Unit]
+          Description=WebSocket to Telnet Bridge for BBS
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          Group=ec2-user
+          WorkingDirectory=/opt/websocket-bridge
+          ExecStart=/usr/bin/node bridge.js
+          Restart=always
+          RestartSec=5
+          Environment=NODE_ENV=production
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/websockify-bbs.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Start and enable websockify service
+      systemd:
+        name: websockify-bbs
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
     - name: Obtain SSL certificate from Let's Encrypt
       command: >
         certbot certonly --webroot -w /var/www/html
-        -d {{ bbs_hostname }}
+        -d {{ bbs_hostname }} -d {{ hostname }} -d www.{{ hostname }} -d xterm.{{ hostname }}
         --email admin@{{ bbs_hostname }}
-        --agree-tos --non-interactive
+        --agree-tos --non-interactive --expand
       register: certbot_result
-      when: not ssl_cert_exists.stat.exists
+      when: cert_renewal_needed
       ignore_errors: yes
+      notify: reload nginx
 
     - name: Display certbot result
       debug:
         msg: "{{ certbot_result.stdout if certbot_result.stdout is defined else certbot_result.stderr }}"
-      when: not ssl_cert_exists.stat.exists and certbot_result is defined
+      when: cert_renewal_needed and certbot_result is defined
+
+    - name: Force nginx reload after certificate update
+      systemd:
+        name: nginx
+        state: reloaded
+      when: cert_renewal_needed and certbot_result is defined and certbot_result.rc == 0
 
     - name: Fail if SSL certificate generation failed
       fail:
         msg: "SSL certificate generation failed. Please check DNS configuration for {{ bbs_hostname }}"
-      when: not ssl_cert_exists.stat.exists and certbot_result is defined and certbot_result.rc != 0
+      when: cert_renewal_needed and certbot_result is defined and certbot_result.rc != 0
 
     - name: Remove basic Nginx configuration
       file:
