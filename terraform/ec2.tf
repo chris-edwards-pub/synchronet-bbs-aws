@@ -72,6 +72,9 @@ resource "aws_instance" "sbbs_server" {
   key_name              = aws_key_pair.sbbs.key_name
   vpc_security_group_ids = [aws_security_group.sbbs.id]
   subnet_id             = aws_subnet.public.id
+  credit_specification {
+    cpu_credits = "standard" # or "unlimited"
+  }
 
   lifecycle {
     ignore_changes = [ami]
